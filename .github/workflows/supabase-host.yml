@@ -1100,17 +1100,13 @@ jobs:
                   fi
                   rm -f "$CLEAN_LOG"
 
-                  # Filter out the DATABASE entry from the TOC list so pg_restore
-                  # does not attempt to DROP/CREATE the postgres database itself,
-                  # while preserving DATABASE PROPERTIES (GUC settings), comments,
-                  # extensions, and all schema objects.
-                  docker compose exec -T db pg_restore -U supabase_admin --list "/tmp/$DB_DUMP_NAME" </dev/null \
-                    | grep -v ' DATABASE - ' \
-                    | docker compose exec -T db sh -c 'cat > /tmp/toc.list'
+                  # Replay database-level GUCs (ALTER DATABASE ... SET) from the archive
+                  docker compose exec -T db pg_restore -C -f - "/tmp/$DB_DUMP_NAME" 2>/dev/null \
+                    | grep -E '^ALTER DATABASE [^ ]+ SET ' \
+                    | docker compose exec -T db psql -U supabase_admin -d postgres >/dev/null 2>&1 || true
 
                   docker compose exec -T db pg_restore -U supabase_admin \
-                    --clean --if-exists --create --disable-triggers --exit-on-error \
-                    --use-list=/tmp/toc.list \
+                    --clean --if-exists --disable-triggers --exit-on-error \
                     -d postgres "/tmp/$DB_DUMP_NAME" </dev/null 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
                   if [ "$RESTORE_STATUS" -ne 0 ]; then
                     echo "::error::PostgreSQL restore failed for postgres:"
