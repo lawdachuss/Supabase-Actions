@@ -1066,41 +1066,82 @@ jobs:
                   RESTORE_FAILED=1
                   break
                 fi
-                # Terminate any active sessions and drop existing database before restore
-                # so that pg_restore does not fail with "database is being accessed by other users".
-                DROP_LOG=$(mktemp)
-                if ! docker compose exec -T db dropdb -U supabase_admin \
-                     --maintenance-db=template1 --if-exists --force "$DB_NAME" </dev/null >"$DROP_LOG" 2>&1; then
-                  echo "::error::failed to drop database before restore: $DB_NAME"
-                  cat "$DROP_LOG" | sed 's/^/    /'
+                RESTORE_LOG=$(mktemp)
+                RESTORE_STATUS=0
+                if [ "$DB_NAME" = "postgres" ]; then
+                  # The root database 'postgres' must NEVER be dropped:
+                  # background workers like pg_cron run inside it, and dropping
+                  # 'postgres' triggers "FATAL: database postgres does not exist",
+                  # causing postmaster crash recovery and aborting pg_restore.
+                  # Instead, wipe non-system schemas with CASCADE so pg_restore
+                  # can cleanly recreate all user/app objects without conflicts.
+                  CLEAN_LOG=$(mktemp)
+                  if ! printf '%s\n' \
+                       'DO $$' \
+                       'DECLARE s text;' \
+                       'BEGIN' \
+                       '  FOR s IN' \
+                       '    SELECT nspname FROM pg_namespace' \
+                       '    WHERE nspname NOT IN ('\''pg_catalog'\'', '\''information_schema'\'', '\''pg_toast'\'', '\''cron'\'')' \
+                       '      AND nspname NOT LIKE '\''pg_%'\''' \
+                       '  LOOP' \
+                       '    EXECUTE '\''DROP SCHEMA IF EXISTS '\'' || quote_ident(s) || '\'' CASCADE;'\'';' \
+                       '  END LOOP;' \
+                       'END $$;' \
+                       'CREATE SCHEMA IF NOT EXISTS public;' \
+                       'GRANT ALL ON SCHEMA public TO postgres, public, anon, authenticated, service_role;' \
+                       | docker compose exec -T db psql -U supabase_admin -d postgres \
+                         -v ON_ERROR_STOP=1 </dev/null >"$CLEAN_LOG" 2>&1; then
+                    echo "::error::failed to clean schemas in database postgres before restore"
+                    cat "$CLEAN_LOG" | sed 's/^/    /'
+                    rm -f "$CLEAN_LOG"
+                    RESTORE_FAILED=1
+                    break
+                  fi
+                  rm -f "$CLEAN_LOG"
+
+                  docker compose exec -T db pg_restore -U supabase_admin \
+                    --clean --if-exists --disable-triggers --exit-on-error \
+                    -d postgres "/tmp/$DB_DUMP_NAME" </dev/null 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
+                  if [ "$RESTORE_STATUS" -ne 0 ]; then
+                    echo "::error::PostgreSQL restore failed for postgres:"
+                    tail -20 "$RESTORE_LOG" | sed 's/^/    /'
+                    echo "=== POSTGRESQL CONTAINER LOGS ==="
+                    docker compose logs --tail=40 db 2>&1 | sed 's/^/    /' || true
+                    RESTORE_FAILED=1
+                  fi
+                else
+                  # Non-system databases (e.g. _supabase, tenant databases):
+                  # Terminate active sessions and drop existing database so
+                  # pg_restore --create can recreate it cleanly.
+                  DROP_LOG=$(mktemp)
+                  if ! docker compose exec -T db dropdb -U supabase_admin \
+                       --maintenance-db=template1 --if-exists --force "$DB_NAME" </dev/null >"$DROP_LOG" 2>&1; then
+                    echo "::error::failed to drop database before restore: $DB_NAME"
+                    cat "$DROP_LOG" | sed 's/^/    /'
+                    rm -f "$DROP_LOG"
+                    RESTORE_FAILED=1
+                    break
+                  fi
                   rm -f "$DROP_LOG"
-                  RESTORE_FAILED=1
-                  break
-                fi
-                rm -f "$DROP_LOG"
-              RESTORE_LOG=$(mktemp)
-              RESTORE_STATUS=0
-              # MUST be the image's superuser: not $DB_OWNER, and not merely
-              # `postgres` — on the real stack `postgres` is a plain role, so
-              # even DROP DATABASE on a Supabase-managed database died with
-              # "must be owner of database _supabase" (live chain run on the
-              # real archive). `supabase_admin` owns the image-created
-              # databases and is superuser. --create issues CREATE DATABASE
-              # (needs CREATEDB) and --disable-triggers needs superuser, so an
-              # ordinary-role owner also failed to restore at all (audited
-              # against a real server: "permission denied to create
-              # database"). Ownership is still applied: the archive replays
-              # its own ALTER ... OWNER TO entries and the ALTER DATABASE step
-              # below re-asserts the recorded owner.
-              docker compose exec -T db pg_restore -U supabase_admin \
-                --clean --if-exists --create --disable-triggers --exit-on-error \
-                -d template1 "/tmp/$DB_DUMP_NAME" </dev/null 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
-                if [ "$RESTORE_STATUS" -ne 0 ]; then
-                  echo "::error::PostgreSQL restore failed for $DB_NAME:"
-                  tail -20 "$RESTORE_LOG" | sed 's/^/    /'
-                  echo "=== POSTGRESQL CONTAINER LOGS ==="
-                  docker compose logs --tail=40 db 2>&1 | sed 's/^/    /' || true
-                  RESTORE_FAILED=1
+
+                  # MUST be the image's superuser: not $DB_OWNER, and not merely
+                  # `postgres` — on the real stack `postgres` is a plain role, so
+                  # even DROP DATABASE on a Supabase-managed database died with
+                  # "must be owner of database _supabase" (live chain run on the
+                  # real archive). `supabase_admin` owns the image-created
+                  # databases and is superuser. --create issues CREATE DATABASE
+                  # (needs CREATEDB) and --disable-triggers needs superuser.
+                  docker compose exec -T db pg_restore -U supabase_admin \
+                    --clean --if-exists --create --disable-triggers --exit-on-error \
+                    -d template1 "/tmp/$DB_DUMP_NAME" </dev/null 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
+                  if [ "$RESTORE_STATUS" -ne 0 ]; then
+                    echo "::error::PostgreSQL restore failed for $DB_NAME:"
+                    tail -20 "$RESTORE_LOG" | sed 's/^/    /'
+                    echo "=== POSTGRESQL CONTAINER LOGS ==="
+                    docker compose logs --tail=40 db 2>&1 | sed 's/^/    /' || true
+                    RESTORE_FAILED=1
+                  fi
                 fi
                 rm -f "$RESTORE_LOG"
                 if [ "$RESTORE_FAILED" -ne 0 ]; then

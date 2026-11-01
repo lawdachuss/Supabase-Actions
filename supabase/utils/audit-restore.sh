@@ -393,22 +393,56 @@ while IFS=$'\t' read -r D NB OB; do
   N=$(b64d "$NB")
   O=$(b64d "$OB")
   SP=$(put_file 2 "$WORK/db-backups/$D") || { fail "could not stage $D server-side"; RESTORE_FAILED=1; continue; }
-  pq 2 dropdb -U supabase_admin --maintenance-db=template1 --if-exists --force "$N" </dev/null >/dev/null 2>&1 || true
-  if pq 2 pg_restore -U supabase_admin --clean --if-exists --create --disable-triggers \
-       --exit-on-error -d template1 "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
-    A=0
-    printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
-      | pq 2 psql -X -U supabase_admin -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
-        > "$WORK/a_$N.log" 2>&1 || A=$?
-    if [ "$A" -eq 0 ]; then
-      pass "restored $N (owner $O)"
+  if [ "$N" = "postgres" ]; then
+    printf '%s\n' \
+      'DO $$' \
+      'DECLARE s text;' \
+      'BEGIN' \
+      '  FOR s IN' \
+      '    SELECT nspname FROM pg_namespace' \
+      '    WHERE nspname NOT IN ('\''pg_catalog'\'', '\''information_schema'\'', '\''pg_toast'\'', '\''cron'\'')' \
+      '      AND nspname NOT LIKE '\''pg_%'\''' \
+      '  LOOP' \
+      '    EXECUTE '\''DROP SCHEMA IF EXISTS '\'' || quote_ident(s) || '\'' CASCADE;'\'';' \
+      '  END LOOP;' \
+      'END $$;' \
+      'CREATE SCHEMA IF NOT EXISTS public;' \
+      'GRANT ALL ON SCHEMA public TO postgres, public, anon, authenticated, service_role;' \
+      | pq 2 psql -X -U supabase_admin -q -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 || true
+    if pq 2 pg_restore -U supabase_admin --clean --if-exists --disable-triggers \
+         --exit-on-error -d postgres "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
+      A=0
+      printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
+        | pq 2 psql -X -U supabase_admin -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
+          > "$WORK/a_$N.log" 2>&1 || A=$?
+      if [ "$A" -eq 0 ]; then
+        pass "restored $N (owner $O)"
+      else
+        fail "owner step failed for $N: $(head -2 "$WORK/a_$N.log" | tr '\n' ' ')"
+        RESTORE_FAILED=1
+      fi
     else
-      fail "owner step failed for $N: $(head -2 "$WORK/a_$N.log" | tr '\n' ' ')"
+      fail "pg_restore failed for $N: $(grep -m1 -i error "$WORK/r_$N.log" | cut -c1-100)"
       RESTORE_FAILED=1
     fi
   else
-    fail "pg_restore failed for $N: $(grep -m1 -i error "$WORK/r_$N.log" | cut -c1-100)"
-    RESTORE_FAILED=1
+    pq 2 dropdb -U supabase_admin --maintenance-db=template1 --if-exists --force "$N" </dev/null >/dev/null 2>&1 || true
+    if pq 2 pg_restore -U supabase_admin --clean --if-exists --create --disable-triggers \
+         --exit-on-error -d template1 "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
+      A=0
+      printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
+        | pq 2 psql -X -U supabase_admin -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
+          > "$WORK/a_$N.log" 2>&1 || A=$?
+      if [ "$A" -eq 0 ]; then
+        pass "restored $N (owner $O)"
+      else
+        fail "owner step failed for $N: $(head -2 "$WORK/a_$N.log" | tr '\n' ' ')"
+        RESTORE_FAILED=1
+      fi
+    else
+      fail "pg_restore failed for $N: $(grep -m1 -i error "$WORK/r_$N.log" | cut -c1-100)"
+      RESTORE_FAILED=1
+    fi
   fi
 done < "$WORK/db-backups/manifest.tsv"
 [ "$RESTORE_FAILED" = "0" ] && pass "every database restored (incl. one owned by a non-superuser)" \
