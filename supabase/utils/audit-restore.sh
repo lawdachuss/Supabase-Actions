@@ -394,8 +394,8 @@ while IFS=$'\t' read -r D NB OB; do
   O=$(b64d "$OB")
   SP=$(put_file 2 "$WORK/db-backups/$D") || { fail "could not stage $D server-side"; RESTORE_FAILED=1; continue; }
   pq 2 dropdb -U supabase_admin --maintenance-db=template1 --if-exists --force "$N" </dev/null >/dev/null 2>&1 || true
-  if pq 2 pg_restore -U supabase_admin --clean --if-exists --create --disable-triggers \
-       --exit-on-error --jobs 2 -d template1 "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
+  if pq 2 pg_restore -U supabase_admin --create --disable-triggers \
+       --exit-on-error -d template1 "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
     A=0
     printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
       | pq 2 psql -X -U supabase_admin -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
