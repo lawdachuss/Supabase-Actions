@@ -238,6 +238,8 @@ DO $$ BEGIN CREATE ROLE authenticator LOGIN NOINHERIT PASSWORD 'audit'; EXCEPTIO
 DO $$ BEGIN CREATE ROLE dashboard_user NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE pgbouncer NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE supabase_admin LOGIN SUPERUSER PASSWORD 'audit'; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE supabase_realtime_admin NOINHERIT CREATEROLE REPLICATION; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE supabase_replication_admin NOINHERIT REPLICATION; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 GRANT anon, authenticated, service_role TO authenticator;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 SQL
