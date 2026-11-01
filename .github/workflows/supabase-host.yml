@@ -156,7 +156,7 @@ jobs:
           GITHUB_CLIENT_ID: ${{ secrets.GITHUB_CLIENT_ID }}
           GITHUB_SECRET: ${{ secrets.GITHUB_SECRET }}
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           if [ -z "$CF_TUNNEL_TOKEN" ]; then
             echo "::error::CF_TUNNEL_TOKEN is required to start the public Cloudflare tunnel"
             exit 1
@@ -386,7 +386,7 @@ jobs:
           CF_BACKUP_ACCOUNT_ID: ${{ vars.CF_BACKUP_ACCOUNT_ID || secrets.CF_BACKUP_ACCOUNT_ID }}
           CF_BACKUP_KV_NAMESPACE_ID: ${{ vars.CF_BACKUP_KV_NAMESPACE_ID || secrets.CF_BACKUP_KV_NAMESPACE_ID }}
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           sed -i -E '/^CF_(ACCOUNT_ID|KV_NAMESPACE_ID|API_TOKEN|REFRESH_TOKEN)=/d' .env 2>/dev/null || true
 
           if [ -n "${CF_BACKUP_ACCOUNT_ID}" ] && [ -n "${CF_BACKUP_KV_NAMESPACE_ID}" ]; then
@@ -468,7 +468,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
 
           extract_state_archive() {
             local archive="$1"
@@ -542,7 +542,7 @@ jobs:
             fi
           fi
 
-          if [ ! -f ./supabase-state.tar.gz ] && [ "${{ github.run_number }}" -gt 1 ]; then
+          if [ ! -f ./supabase-state.tar.gz ] && [ "${GITHUB_RUN_NUMBER:-0}" -gt 1 ]; then
             echo "::error::no cached or off-site state archive exists after the first workflow run; refusing to create an empty replacement database"
             exit 1
           fi
@@ -802,7 +802,7 @@ jobs:
           # with "unbound variable" and never pruned a single entry.
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           bash utils/prune-caches.sh || true
 
       # Restore databases before starting the application services.
@@ -810,7 +810,7 @@ jobs:
         env:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
 
           # Keep application connections away while the database is restored.
           STATUS_FILE=$(mktemp)
@@ -1304,7 +1304,7 @@ jobs:
       # sessions  the tracking table itself is carried by the state backup.
       - name:  Apply committed migrations
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
 
           PG_READY=0
           for i in $(seq 1 60); do
@@ -1364,7 +1364,7 @@ jobs:
       # email_confirmed_at = NULL. This catches them on every startup.
       - name:  Confirm all unconfirmed users
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           docker compose exec -T db psql -U postgres -c \
             "UPDATE auth.users SET email_confirmed_at = NOW(), email_change_confirm_status = 0 WHERE email_confirmed_at IS NULL;"
           echo " All unconfirmed users confirmed"
@@ -1375,7 +1375,7 @@ jobs:
       # rows and settings you deleted stay deleted (no more auto-seed).
       - name:  Verify restored state (read-only)
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
 
           # Wait until Postgres is accepting connections
           PG_READY=0
@@ -1449,7 +1449,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}   # hourly prune-caches.sh needs it too
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           rm -f ./.snapshot-success
 
           DURATION=18300  # 5h05m  leaves ~50 min buffer for final backup + cache save
@@ -1517,8 +1517,8 @@ jobs:
           echo "|  Public Redis:  $REDIS_HTTP_URL       |"
           echo "|  Snapshots:     every 5 min  saved at shutdown             |"
           echo "|                                                             |"
-          echo "|  Monitor:       https://github.com/${{ github.repository }}/actions|"
-          echo "|  Badge:         https://github.com/${{ github.repository }}/actions/workflows/supabase-host.yml/badge.svg |"
+          echo "|  Monitor:       https://github.com/$GITHUB_REPOSITORY/actions|"
+          echo "|  Badge:         https://github.com/$GITHUB_REPOSITORY/actions/workflows/supabase-host.yml/badge.svg |"
           echo "|                                                             |"
           echo "|  Runs until:    $(date -d @$END_TIME '+%H:%M UTC')             |"
           echo "|  Auto-restart:  self-chain + hourly schedule                |"
@@ -1638,7 +1638,7 @@ jobs:
             if [ $(( TICK % 3 )) -eq 0 ] && curl -sf --max-time 10 -o /dev/null \
                  -H "Authorization: Bearer $GH_TOKEN" \
                  -H "Accept: application/vnd.github.raw" \
-                 "https://api.github.com/repos/${{ github.repository }}/contents/.session-stop?ref=master"; then
+                 "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/.session-stop?ref=master"; then
               echo "  End-session marker (.session-stop) detected  ending session gracefully; state will be saved to cache"
               break
             fi
@@ -1664,7 +1664,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           export FORCE_PUSH=1
           # CRITICAL: snapshot-state.sh authenticates to Redis before it writes
           # anything, and the stack's password is NOT necessarily the optional
@@ -1744,7 +1744,7 @@ jobs:
       - name:  Stop Supabase services
         if: always()
         run: |
-          cd ${{ env.SUPABASE_DIR }}
+          cd "$SUPABASE_DIR"
           docker compose down 2>/dev/null || true
           echo "All services stopped"
 
