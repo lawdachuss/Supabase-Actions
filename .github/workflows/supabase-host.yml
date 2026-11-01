@@ -980,10 +980,9 @@ jobs:
 
               # Pre-create roles needed by extensions/services (like realtime) so
               # that they always exist even before globals or DB restores run.
-              docker compose exec -T db psql -U supabase_admin -d postgres </dev/null <<'SQL' >/dev/null 2>&1 || true
-DO $$ BEGIN CREATE ROLE supabase_realtime_admin NOINHERIT CREATEROLE REPLICATION; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN CREATE ROLE supabase_replication_admin NOINHERIT REPLICATION; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-SQL
+              docker compose exec -T db psql -U supabase_admin -d postgres </dev/null \
+                -c "DO \$\$ BEGIN CREATE ROLE supabase_realtime_admin NOINHERIT CREATEROLE REPLICATION; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" \
+                -c "DO \$\$ BEGIN CREATE ROLE supabase_replication_admin NOINHERIT REPLICATION; EXCEPTION WHEN duplicate_object THEN NULL; END \$\$;" >/dev/null 2>&1 || true
 
               GLOBAL_LOG=$(mktemp)
               GLOBAL_RESTORE_FILE=$(mktemp)
