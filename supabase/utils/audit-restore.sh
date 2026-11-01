@@ -391,6 +391,7 @@ while IFS=$'\t' read -r D NB OB; do
   N=$(b64d "$NB")
   O=$(b64d "$OB")
   SP=$(put_file 2 "$WORK/db-backups/$D") || { fail "could not stage $D server-side"; RESTORE_FAILED=1; continue; }
+  pq 2 dropdb -U supabase_admin --maintenance-db=template1 --if-exists --force "$N" </dev/null >/dev/null 2>&1 || true
   if pq 2 pg_restore -U supabase_admin --clean --if-exists --create --disable-triggers \
        --exit-on-error --jobs 2 -d template1 "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
     A=0

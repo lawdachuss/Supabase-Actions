@@ -1060,6 +1060,18 @@ jobs:
                   RESTORE_FAILED=1
                   break
                 fi
+                # Terminate any active sessions and drop existing database before restore
+                # so that pg_restore does not fail with "database is being accessed by other users".
+                DROP_LOG=$(mktemp)
+                if ! docker compose exec -T db dropdb -U supabase_admin \
+                     --maintenance-db=template1 --if-exists --force "$DB_NAME" </dev/null >"$DROP_LOG" 2>&1; then
+                  echo "::error::failed to drop database before restore: $DB_NAME"
+                  cat "$DROP_LOG" | sed 's/^/    /'
+                  rm -f "$DROP_LOG"
+                  RESTORE_FAILED=1
+                  break
+                fi
+                rm -f "$DROP_LOG"
               RESTORE_LOG=$(mktemp)
               RESTORE_STATUS=0
               # MUST be the image's superuser: not $DB_OWNER, and not merely
