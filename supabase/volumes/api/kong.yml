@@ -55,11 +55,15 @@ services:
           minute: 30
           policy: redis
           fault_tolerant: true
-          redis_host: redis
-          redis_port: 6379
-          redis_password: $REDIS_PASSWORD
-          redis_timeout: 2000
-          redis_database: 0
+          # Nested form: the flat redis_host/redis_port/redis_password/
+          # redis_timeout/redis_database keys are deprecated since Kong 3.9 and
+          # removed after 4.0 (kong/plugins/rate-limiting/schema.lua).
+          redis:
+            host: redis
+            port: 6379
+            password: $REDIS_PASSWORD
+            timeout: 2000
+            database: 0
   - name: auth-v1-open-callback
     _comment: 'Auth: /auth/v1/callback* -> http://auth:9999/callback*'
     url: http://auth:9999/callback
@@ -75,11 +79,15 @@ services:
           minute: 30
           policy: redis
           fault_tolerant: true
-          redis_host: redis
-          redis_port: 6379
-          redis_password: $REDIS_PASSWORD
-          redis_timeout: 2000
-          redis_database: 0
+          # Nested form: the flat redis_host/redis_port/redis_password/
+          # redis_timeout/redis_database keys are deprecated since Kong 3.9 and
+          # removed after 4.0 (kong/plugins/rate-limiting/schema.lua).
+          redis:
+            host: redis
+            port: 6379
+            password: $REDIS_PASSWORD
+            timeout: 2000
+            database: 0
   - name: auth-v1-open-authorize
     _comment: 'Auth: /auth/v1/authorize* -> http://auth:9999/authorize*'
     url: http://auth:9999/authorize
@@ -95,11 +103,15 @@ services:
           minute: 30
           policy: redis
           fault_tolerant: true
-          redis_host: redis
-          redis_port: 6379
-          redis_password: $REDIS_PASSWORD
-          redis_timeout: 2000
-          redis_database: 0
+          # Nested form: the flat redis_host/redis_port/redis_password/
+          # redis_timeout/redis_database keys are deprecated since Kong 3.9 and
+          # removed after 4.0 (kong/plugins/rate-limiting/schema.lua).
+          redis:
+            host: redis
+            port: 6379
+            password: $REDIS_PASSWORD
+            timeout: 2000
+            database: 0
   - name: auth-v1-open-jwks
     _comment: 'Auth: /auth/v1/.well-known/jwks.json -> http://auth:9999/.well-known/jwks.json'
     url: http://auth:9999/.well-known/jwks.json
@@ -125,11 +137,12 @@ services:
           minute: 10
           policy: redis
           fault_tolerant: true
-          redis_host: redis
-          redis_port: 6379
-          redis_password: $REDIS_PASSWORD
-          redis_timeout: 2000
-          redis_database: 0
+          redis:
+            host: redis
+            port: 6379
+            password: $REDIS_PASSWORD
+            timeout: 2000
+            database: 0
 
   - name: auth-v1-open-sso-metadata
     url: "http://auth:9999/sso/saml/metadata"
