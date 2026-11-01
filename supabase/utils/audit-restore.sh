@@ -176,6 +176,13 @@ for needle in '--format=custom --compress=6 --create' 'pg_dumpall' 'pg_restore -
   grep -qF -- "$needle" "$SNAPSHOT_SH" \
     || die "snapshot-state.sh no longer contains '$needle' — this audit would test the wrong dump"
 done
+# ...and the restore role/flags the workflow uses must be the ones this audit
+# exercises — the live chain proved Role matters when `postgres` turned out not
+# to be a superuser on the real image.
+for needle in 'pg_restore -U supabase_admin' '--clean --if-exists --create --disable-triggers --exit-on-error --jobs 2'; do
+  grep -qF -- "$needle" "$WF" \
+    || die "the workflow's restore command no longer contains '$needle' — mirror it here before trusting this audit"
+done
 
 # ── pull the globals awk filter straight out of the workflow, so editing the
 #    filter there immediately changes what this audit exercises.
@@ -329,11 +336,11 @@ while IFS=$'\t' read -r D NB OB; do
   N=$(b64d "$NB")
   O=$(b64d "$OB")
   SP=$(put_file 2 "$WORK/db-backups/$D") || { fail "could not stage $D server-side"; RESTORE_FAILED=1; continue; }
-  if pq 2 pg_restore -U postgres --clean --if-exists --create --disable-triggers \
+  if pq 2 pg_restore -U supabase_admin --clean --if-exists --create --disable-triggers \
        --exit-on-error --jobs 2 -d template1 "$SP" > "$WORK/r_$N.log" 2>&1; then
     A=0
     printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
-      | pq 2 psql -X -U postgres -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
+      | pq 2 psql -X -U supabase_admin -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
         > "$WORK/a_$N.log" 2>&1 || A=$?
     if [ "$A" -eq 0 ]; then
       pass "restored $N (owner $O)"

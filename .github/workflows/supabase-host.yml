@@ -1035,15 +1035,19 @@ jobs:
                 fi
               RESTORE_LOG=$(mktemp)
               RESTORE_STATUS=0
-              # MUST be a superuser, not $DB_OWNER. --create issues CREATE
-              # DATABASE (needs CREATEDB) and --disable-triggers needs
-              # superuser, so a database owned by an ordinary role failed to
-              # restore at all (audited against a real server: "permission
-              # denied to create database"), which aborted the whole restore and
-              # the session never came up. Ownership is still applied: the
-              # archive replays its own ALTER ... OWNER TO entries and the
-              # ALTER DATABASE step below re-asserts the recorded owner.
-              docker compose exec -T db pg_restore -U postgres \
+              # MUST be the image's superuser: not $DB_OWNER, and not merely
+              # `postgres` — on the real stack `postgres` is a plain role, so
+              # even DROP DATABASE on a Supabase-managed database died with
+              # "must be owner of database _supabase" (live chain run on the
+              # real archive). `supabase_admin` owns the image-created
+              # databases and is superuser. --create issues CREATE DATABASE
+              # (needs CREATEDB) and --disable-triggers needs superuser, so an
+              # ordinary-role owner also failed to restore at all (audited
+              # against a real server: "permission denied to create
+              # database"). Ownership is still applied: the archive replays
+              # its own ALTER ... OWNER TO entries and the ALTER DATABASE step
+              # below re-asserts the recorded owner.
+              docker compose exec -T db pg_restore -U supabase_admin \
                 --clean --if-exists --create --disable-triggers --exit-on-error --jobs 2 \
                 -d template1 "/tmp/$DB_DUMP_NAME" 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
                 if [ "$RESTORE_STATUS" -ne 0 ]; then
@@ -1056,10 +1060,10 @@ jobs:
                   break
                 fi
               # Also run as a superuser: pg_restore just recreated the database
-              # as postgres, so $DB_OWNER could not alter it ("must be owner of
-              # database"). A superuser can hand ownership to any role.
+              # as supabase_admin, so $DB_OWNER could not alter it ("must be
+              # owner of database"). A superuser can hand ownership to any role.
               if ! printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
-                   | docker compose exec -T db psql -U postgres -d template1 \
+                   | docker compose exec -T db psql -U supabase_admin -d template1 \
                      -v ON_ERROR_STOP=1 -v "db_name=$DB_NAME" -v "db_owner=$DB_OWNER" \
                      >/dev/null; then
                   echo "::error::failed to restore database owner for $DB_NAME"
@@ -1086,7 +1090,7 @@ jobs:
                 echo 1 > "$STATUS_FILE"
                 return
               fi
-              if ! docker compose exec -T db pg_restore -U postgres \
+              if ! docker compose exec -T db pg_restore -U supabase_admin \
                    --list /tmp/backup.dump >/dev/null; then
                 echo "::error::legacy database backup is not a valid PostgreSQL archive"
                 echo 1 > "$STATUS_FILE"
@@ -1096,20 +1100,20 @@ jobs:
               # extensions. Cleaning objects inside the initialized database
               # leaves dependency/permission conflicts; replace the database
               # from template1, then restore into the empty database.
-              if ! docker compose exec -T db dropdb -U postgres \
+              if ! docker compose exec -T db dropdb -U supabase_admin \
                    --maintenance-db=template1 --if-exists --force postgres; then
                 echo "::error::could not replace database before legacy restore"
                 echo 1 > "$STATUS_FILE"
                 return
               fi
-              if ! docker compose exec -T db createdb -U postgres \
+              if ! docker compose exec -T db createdb -U supabase_admin \
                    --template=template1 postgres; then
                 echo "::error::could not recreate database for legacy restore"
                 echo 1 > "$STATUS_FILE"
                 return
               fi
               RESTORE_LOG=$(mktemp)
-              if ! docker compose exec -T db pg_restore -U postgres -d postgres \
+              if ! docker compose exec -T db pg_restore -U supabase_admin -d postgres \
                  --no-owner --no-privileges --disable-triggers --exit-on-error --jobs 2 \
                    /tmp/backup.dump 2>"$RESTORE_LOG"; then
                 echo "::error::legacy database restore failed"
