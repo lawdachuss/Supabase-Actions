@@ -49,7 +49,10 @@ fi
 
 : > "$DB_STAGING/manifest.tsv"
 DB_INDEX=0
-while IFS='|' read -r DB_NAME_B64 DB_OWNER_B64; do
+mapfile -t DB_ENTRIES <<< "$DB_LIST"
+for DB_ENTRY in "${DB_ENTRIES[@]}"; do
+  [ -n "$DB_ENTRY" ] || continue
+  IFS='|' read -r DB_NAME_B64 DB_OWNER_B64 <<< "$DB_ENTRY"
   [ -n "$DB_NAME_B64" ] || continue
   DB_INDEX=$((DB_INDEX + 1))
   DB_NAME="$(printf '%s' "$DB_NAME_B64" | base64 -d)"
@@ -62,23 +65,21 @@ while IFS='|' read -r DB_NAME_B64 DB_OWNER_B64; do
   DB_DUMP_NAME="$(printf 'db-%08d.dump' "$DB_INDEX")"
   echo "  🗄️  dumping database: $DB_NAME"
   if ! docker compose exec -T db pg_dump -U postgres --format=custom --compress=6 --create \
-       --dbname="$DB_NAME" > "$DB_STAGING/$DB_DUMP_NAME" \
+       --dbname="$DB_NAME" </dev/null > "$DB_STAGING/$DB_DUMP_NAME" \
        || [ ! -s "$DB_STAGING/$DB_DUMP_NAME" ]; then
     echo "  ERROR: failed to dump database: $DB_NAME" >&2
     rm -rf "$DB_STAGING"
     exit 1
   fi
-  if ! docker compose cp "$DB_STAGING/$DB_DUMP_NAME" db:/tmp/state-validation.dump \
-       || ! docker compose exec -T db pg_restore --list /tmp/state-validation.dump >/dev/null \
-       || ! docker compose exec -T db rm -f /tmp/state-validation.dump; then
+  if ! docker compose cp "$DB_STAGING/$DB_DUMP_NAME" db:/tmp/state-validation.dump </dev/null \
+       || ! docker compose exec -T db pg_restore --list /tmp/state-validation.dump </dev/null >/dev/null \
+       || ! docker compose exec -T db rm -f /tmp/state-validation.dump </dev/null; then
     echo "  ERROR: PostgreSQL dump validation failed for database: $DB_NAME" >&2
     rm -rf "$DB_STAGING"
     exit 1
   fi
   printf '%s\t%s\t%s\n' "$DB_DUMP_NAME" "$DB_NAME_B64" "$DB_OWNER_B64" >> "$DB_STAGING/manifest.tsv"
-done <<EOF
-$DB_LIST
-EOF
+done
 
 if [ "$DB_INDEX" -eq 0 ]; then
   echo "  ERROR: no database dumps were created; keeping the previous archive" >&2

@@ -906,7 +906,10 @@ jobs:
               echo "Restoring all databases and PostgreSQL roles from the complete state backup..."
               PREFLIGHT_NAMES=$(mktemp)
               PREFLIGHT_COUNT=0
-              while IFS=$'\t' read -r DB_DUMP_NAME DB_NAME_B64 DB_OWNER_B64 EXTRA_FIELD; do
+              mapfile -t MANIFEST_ENTRIES < ./db-backups/manifest.tsv
+              for MANIFEST_LINE in "${MANIFEST_ENTRIES[@]}"; do
+                [ -n "$MANIFEST_LINE" ] || continue
+                IFS=$'\t' read -r DB_DUMP_NAME DB_NAME_B64 DB_OWNER_B64 EXTRA_FIELD <<< "$MANIFEST_LINE"
                 [ -n "$DB_DUMP_NAME" ] || continue
                 if [ -n "$EXTRA_FIELD" ] \
                    || ! [[ "$DB_DUMP_NAME" =~ ^db-[0-9]{8}\.dump$ ]] \
@@ -939,14 +942,14 @@ jobs:
                   return
                 fi
                 printf '%s\n' "$DB_NAME" >> "$PREFLIGHT_NAMES"
-                if ! docker compose cp "./db-backups/$DB_DUMP_NAME" "db:/tmp/$DB_DUMP_NAME"; then
+                if ! docker compose cp "./db-backups/$DB_DUMP_NAME" "db:/tmp/$DB_DUMP_NAME" </dev/null; then
                   echo "::error::database dump failed pre-restore validation: $DB_DUMP_NAME"
                   rm -f "$PREFLIGHT_NAMES"
                   echo 1 > "$STATUS_FILE"
                   return
                 fi
                 if ! DUMP_DB_NAME=$(docker compose exec -T db pg_restore -U postgres \
-                  --list "/tmp/$DB_DUMP_NAME" 2>/dev/null \
+                  --list "/tmp/$DB_DUMP_NAME" </dev/null 2>/dev/null \
                   | sed -n -e 's/^;[[:space:]]*dbname: //p' \
                       -e 's/^; Database: //p' | tr -d '\r'); then
                   echo "::error::database dump failed pre-restore validation: $DB_DUMP_NAME"
@@ -961,7 +964,7 @@ jobs:
                   return
                 fi
                 PREFLIGHT_COUNT=$((PREFLIGHT_COUNT + 1))
-              done < ./db-backups/manifest.tsv
+              done
               rm -f "$PREFLIGHT_NAMES"
               if [ "$PREFLIGHT_COUNT" -eq 0 ]; then
                 echo "::error::database manifest contains no database entries"
@@ -1023,7 +1026,9 @@ jobs:
 
               RESTORE_FAILED=0
               RESTORE_COUNT=0
-              while IFS=$'\t' read -r DB_DUMP_NAME DB_NAME_B64 DB_OWNER_B64; do
+              for MANIFEST_LINE in "${MANIFEST_ENTRIES[@]}"; do
+                [ -n "$MANIFEST_LINE" ] || continue
+                IFS=$'\t' read -r DB_DUMP_NAME DB_NAME_B64 DB_OWNER_B64 <<< "$MANIFEST_LINE"
                 [ -n "$DB_DUMP_NAME" ] || continue
                 case "$DB_DUMP_NAME" in
                   db-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9].dump) ;;
@@ -1050,7 +1055,7 @@ jobs:
                   break
                 fi
                 echo "Restoring database: $DB_NAME"
-                if ! docker compose cp "./db-backups/$DB_DUMP_NAME" "db:/tmp/$DB_DUMP_NAME"; then
+                if ! docker compose cp "./db-backups/$DB_DUMP_NAME" "db:/tmp/$DB_DUMP_NAME" </dev/null; then
                   echo "::error::failed to copy database dump: $DB_DUMP_NAME"
                   RESTORE_FAILED=1
                   break
@@ -1071,7 +1076,7 @@ jobs:
               # below re-asserts the recorded owner.
               docker compose exec -T db pg_restore -U supabase_admin \
                 --clean --if-exists --create --disable-triggers --exit-on-error --jobs 2 \
-                -d template1 "/tmp/$DB_DUMP_NAME" 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
+                -d template1 "/tmp/$DB_DUMP_NAME" </dev/null 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
                 if [ "$RESTORE_STATUS" -ne 0 ]; then
                   echo "::error::PostgreSQL restore failed for $DB_NAME:"
                   tail -20 "$RESTORE_LOG" | sed 's/^/    /'
@@ -1086,14 +1091,14 @@ jobs:
               # owner of database"). A superuser can hand ownership to any role.
               if ! printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
                    | docker compose exec -T db psql -U supabase_admin -d template1 \
-                     -v ON_ERROR_STOP=1 -v "db_name=$DB_NAME" -v "db_owner=$DB_OWNER" \
+                     -v ON_ERROR_STOP=1 -v "db_name=$DB_NAME" -v "db_owner=$DB_OWNER" </dev/null \
                      >/dev/null; then
                   echo "::error::failed to restore database owner for $DB_NAME"
                   RESTORE_FAILED=1
                   break
                 fi
                 RESTORE_COUNT=$((RESTORE_COUNT + 1))
-              done < ./db-backups/manifest.tsv
+              done
 
               if [ "$RESTORE_COUNT" -eq 0 ]; then
                 echo "::error::database manifest did not contain any restorable databases"
