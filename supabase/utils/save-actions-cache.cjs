@@ -27,6 +27,27 @@ async function main() {
     return;
   }
 
+  // Route caching requests to v2 Results service and avoid dead v1 endpoint
+  delete process.env.ACTIONS_CACHE_URL;
+  if (process.env.ACTIONS_RESULTS_URL) {
+    process.env.ACTIONS_CACHE_SERVICE_V2 = 'true';
+  }
+
+  // Intercept raw HTML/503 errors from @actions/core warning logger
+  try {
+    const core = require('@actions/core');
+    if (core && typeof core.warning === 'function') {
+      const origWarning = core.warning.bind(core);
+      core.warning = (msg, ...args) => {
+        if (typeof msg === 'string' && (msg.includes('Our services') || msg.includes('503') || msg.includes('<!DOCTYPE') || msg.includes('<html') || msg.includes('<h2>'))) {
+          console.log('[actions-cache] ℹ️ In-job cache service returned 503; persistent state is preserved by Cloudflare KV + GitHub Releases');
+          return;
+        }
+        origWarning(msg, ...args);
+      };
+    }
+  } catch (_) {}
+
   let cache;
   try {
     cache = require('@actions/cache');
