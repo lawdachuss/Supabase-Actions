@@ -112,7 +112,7 @@ $$;
 -- ─── 2. Atomic view count ────────────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION increment_viewer_count(p_recording_id uuid)
-RETURNS integer
+RETURNS bigint
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = public
@@ -120,5 +120,5 @@ AS $$
   UPDATE public.recordings
   SET viewers = COALESCE(viewers, 0) + 1
   WHERE id = p_recording_id
-  RETURNING COALESCE(viewers, 0);
+  RETURNING COALESCE(viewers, 0)::bigint;
 $$;

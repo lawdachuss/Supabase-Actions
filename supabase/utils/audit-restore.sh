@@ -282,7 +282,12 @@ while IFS='|' read -r N O; do
   [ -n "$N" ] || continue
   IDX=$((IDX + 1))
   F=$(printf 'db-%08d.dump' "$IDX")
-  pq 1 pg_dump -U postgres --format=custom --compress=6 --create --dbname="$N" > "$WORK/db-backups/$F" 2>/dev/null \
+  # < /dev/null HERE and in the preflight loop: `docker exec -i` drains its
+  # stdin when the child doesn't read it, which consumed the enclosing
+  # read-loop's file — the first CI docker run failed with exactly this and
+  # only snapshotted the first database in the list.
+  pq 1 pg_dump -U postgres --format=custom --compress=6 --create --dbname="$N" \
+    </dev/null > "$WORK/db-backups/$F" 2>/dev/null \
     || { fail "pg_dump failed for $N"; exit 1; }
   pq 1 pg_restore -U postgres --list < "$WORK/db-backups/$F" >/dev/null 2>&1 \
     || { fail "dump validation failed for $N"; exit 1; }
@@ -313,7 +318,7 @@ while IFS=$'\t' read -r D NB _OB; do
   [ -n "$D" ] || continue
   WANT=$(b64d "$NB")
   SP=$(put_file 2 "$WORK/db-backups/$D") || { PF=0; continue; }
-  GOT=$(pq 2 pg_restore -U postgres --list "$SP" 2>/dev/null \
+  GOT=$(pq 2 pg_restore -U postgres --list "$SP" </dev/null 2>/dev/null \
         | sed -n -e 's/^;[[:space:]]*dbname: //p' -e 's/^; Database: //p' | tr -d '\r')
   [ "$WANT" = "$GOT" ] || { PF=0; printf '       %s: manifest=%s dump=%s\n' "$D" "$WANT" "$GOT"; }
 done < "$WORK/db-backups/manifest.tsv"
@@ -337,7 +342,7 @@ while IFS=$'\t' read -r D NB OB; do
   O=$(b64d "$OB")
   SP=$(put_file 2 "$WORK/db-backups/$D") || { fail "could not stage $D server-side"; RESTORE_FAILED=1; continue; }
   if pq 2 pg_restore -U supabase_admin --clean --if-exists --create --disable-triggers \
-       --exit-on-error --jobs 2 -d template1 "$SP" > "$WORK/r_$N.log" 2>&1; then
+       --exit-on-error --jobs 2 -d template1 "$SP" </dev/null > "$WORK/r_$N.log" 2>&1; then
     A=0
     printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
       | pq 2 psql -X -U supabase_admin -q -d template1 -v ON_ERROR_STOP=1 -v "db_name=$N" -v "db_owner=$O" \
