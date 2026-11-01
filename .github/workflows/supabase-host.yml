@@ -1201,10 +1201,13 @@ jobs:
           echo "All services ready!"
           docker compose ps 2>/dev/null | head -15
 
-      #  Apply committed migrations (versioned schema changes) 
-      # Applies supabase/migrations/*.sql on top of the restored DB (fresh DBs
-      # already get the volumes/db/*.sql init scripts at first boot). Files are
-      # tracked in public._schema_migrations so each one runs only once across
+      #  Apply committed migrations (versioned schema changes)
+      # Applies supabase/migrations/*.sql — Supabase PLATFORM SQL only — on top
+      # of the restored DB (fresh DBs already get the volumes/db/*.sql init
+      # scripts at first boot). The chuglii application layer lives in
+      # supabase/migrations-app/ and is applied separately via ./remote.sh with
+      # the service key, never at boot. Files are tracked in
+      # public._schema_migrations so each one runs only once across
       # sessions  the tracking table itself is carried by the state backup.
       - name:  Apply committed migrations
         run: |
@@ -1223,8 +1226,8 @@ jobs:
             exit 0
           fi
 
-          # Grant postgres read access to auth schema so any migration that
-          # JOINs auth.users (e.g. 002-backfill-user-emails.sql) succeeds.
+          # Grant postgres read access to auth schema so any platform migration
+          # that JOINs auth.users succeeds.
           docker compose exec -T db psql -U postgres -c "
             GRANT USAGE ON SCHEMA auth TO postgres;
             GRANT SELECT ON ALL TABLES IN SCHEMA auth TO postgres;
@@ -1320,8 +1323,24 @@ jobs:
           else
             echo "    (vault schema not present)"
           fi
+          echo "   migration tracker (platform + app, restored from the archive):"
+          docker compose exec -T db psql -U postgres -t -A -c \
+            "SELECT COALESCE(string_agg(name, ', ' ORDER BY name), '(none)') FROM public._schema_migrations;" 2>/dev/null \
+            | sed 's/^/    /' || echo "    (tracker missing — migrations will re-run)"
+          echo "   databases restored from the archive:"
+          docker compose exec -T db psql -U postgres -t -A -c \
+            "SELECT COALESCE(string_agg(datname, ', ' ORDER BY datname), '(none)') FROM pg_database WHERE datallowconn AND NOT datistemplate;" 2>/dev/null \
+            | sed 's/^/    /'
           echo "   redis (cache & rate-limiting):"
-          docker compose exec -T redis redis-cli ping 2>/dev/null | sed 's/^/    /' || echo "    (redis running)"
+          # The container has REDIS_PASSWORD in its environment; pass it so this
+          # is a real PING instead of a NOAUTH error that the `||` hides.
+          docker compose exec -T redis sh -c \
+            'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping' 2>/dev/null \
+            | sed 's/^/    /' || echo "    (redis running, PING failed — check REDIS_PASSWORD)"
+          echo "   redis keyspaces (db0=Kong rate limits, db1=app cache):"
+          docker compose exec -T redis sh -c \
+            'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" info keyspace' 2>/dev/null \
+            | tr -d '\r' | sed 's/^/    /' || echo "    (unavailable)"
           echo "=============================================================="
 
       #  Run Supabase (keep alive + on-disk snapshots every 5 minutes) 

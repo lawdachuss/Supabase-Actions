@@ -126,7 +126,7 @@ echo "  Keep this running — the local address stays valid forever."
 echo ""
 if [ -n "${REDIS_PASSWORD:-}" ]; then
   echo "  URI:         redis://default:${REDIS_PASSWORD}@127.0.0.1:$LOCAL_PORT"
-  echo "  CLI:         redis-cli -h 127.0.0.1 -p $LOCAL_PORT -a '\$REDIS_PASSWORD'"
+  echo "  CLI:         redis-cli -h 127.0.0.1 -p $LOCAL_PORT -a '${REDIS_PASSWORD}'"
 else
   echo "  URI:         redis://default:<REDIS_PASSWORD>@127.0.0.1:$LOCAL_PORT"
   echo "  CLI:         redis-cli -h 127.0.0.1 -p $LOCAL_PORT"

@@ -1,4 +1,6 @@
 -- Pin function search paths so callers cannot influence name resolution.
+-- (Platform-only file: the pin of public.claim_premium_reward moved to
+-- ../migrations-app/013-api-permissions-for-app-layer.sql with the app layer.)
 ALTER FUNCTION _supabase.register_access_token(text, text)
   SET search_path = pg_catalog, extensions;
 ALTER FUNCTION _supabase.check_token_jti(uuid)
@@ -7,8 +9,6 @@ ALTER FUNCTION _supabase.revoke_token_by_id(uuid)
   SET search_path = pg_catalog, extensions;
 ALTER FUNCTION _supabase.list_access_tokens(boolean)
   SET search_path = pg_catalog, extensions;
-ALTER FUNCTION public.claim_premium_reward(uuid, integer, integer)
-  SET search_path = public, pg_catalog;
 ALTER FUNCTION public.custom_access_token_hook(jsonb)
   SET search_path = pg_catalog;
 

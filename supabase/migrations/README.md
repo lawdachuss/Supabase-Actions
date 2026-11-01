@@ -1,8 +1,16 @@
-# Committed migrations
+# Committed migrations (Supabase platform SQL only)
 
 SQL files in this folder are applied **on top of the restored database** at the
 start of every session (in filename order), tracked in
 `public._schema_migrations` so each file runs only once.
+
+Every file here must be **Supabase-platform SQL**: things the stack itself
+needs on a clean, appless database (auth hook wiring, migration-tracker RLS,
+API role defaults, platform hardening). Application SQL (chuglii tables, RPCs,
+app RLS and API permissions) lives in [`../migrations-app/`](../migrations-app/)
+and is applied explicitly through the key-based bridge (`./remote.sh`), never
+at boot. Statements that reference app tables are guaranteed to fail a fresh
+platform boot, so they never belong in this folder.
 
 ## Why this exists
 
@@ -35,7 +43,7 @@ Remote pushes and committed files share the same `public._schema_migrations`
 tracking table, so they never double-apply, and both survive the 6-hour session
 restarts.
 
-## Included example
+## Included migrations
 
 - `001-custom-access-token-hook.sql` — pass-through `public.custom_access_token_hook`
   (Supabase Auth hook). Enabled by default config only when
@@ -44,9 +52,18 @@ restarts.
 - `009-security-linter-fixes.sql` — pins function search paths and limits the
   custom access-token hook to `supabase_auth_admin`.
 - `010-schema-migrations-rls.sql` — enables RLS and revokes API-role access to
-  the migration tracker. The RLS-enabled `edge_cache` table intentionally has
-  no policies; ordinary API roles must not access it.
+  the migration tracker. The tracker table intentionally has no policies;
+  ordinary API roles must not read it (`./remote.sh status` reads it server-side
+  as the superuser instead).
 - `011-api-role-permissions.sql` — revokes broad default grants for new public
-  objects, applies explicit table permissions, and limits mutating RPCs to
-  `service_role`. New public objects now need deliberate grants before they
+  objects. New public objects now need deliberate grants before they
   are reachable through the Data API.
+- `012-service-role-api-access.sql` — re-grants the admin (`service_role`) key
+  the table/sequence/function access it needs, while leaving `anon` and
+  `authenticated` locked down. Also keeps `_schema_migrations` private.
+
+> **Tracker names are basenames.** A file in this folder and a file in
+> `migrations-app/` must never share a name, or the second one is silently
+> skipped as "already applied". App migrations keep their historic 002–008
+> names; new app files should use an `app-` prefix or the next free number
+> (014+).

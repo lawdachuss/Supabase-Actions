@@ -18,6 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIGRATIONS_DIR="$SCRIPT_DIR/supabase/migrations"
+MIGRATIONS_APP_DIR="$SCRIPT_DIR/supabase/migrations-app"
 ENV_FILE="$SCRIPT_DIR/remote.env"
 
 # Load optional ./remote.env (REMOTE_URL, REMOTE_SERVICE_KEY) if it exists.
@@ -121,7 +122,8 @@ cmd_run() {
   rm -f "$tmp"
 }
 
-cmd_push() {
+cmd_push_dir() {
+  local dir="$1"; shift
   require
   require_json_builder
   local files=()
@@ -132,9 +134,9 @@ cmd_push() {
     done
   else
     shopt -s nullglob
-    local glob=("$MIGRATIONS_DIR"/*.sql)
+    local glob=("$dir"/*.sql)
     shopt -u nullglob
-    [ ${#glob[@]} -gt 0 ] || die "no migrations found in $MIGRATIONS_DIR"
+    [ ${#glob[@]} -gt 0 ] || die "no migrations found in $dir"
     files=("${glob[@]}")
   fi
 
@@ -145,6 +147,9 @@ cmd_push() {
   pprint "$(api POST "$ENDPOINT" "$tmp")"
   rm -f "$tmp"
 }
+
+cmd_push() { cmd_push_dir "$MIGRATIONS_DIR" "$@"; }
+cmd_push_app() { cmd_push_dir "$MIGRATIONS_APP_DIR" "$@"; }
 
 cmd_untrack() {
   require
@@ -174,8 +179,10 @@ Commands:
   status                   list applied migrations + DB info
   health                   alias for status
   run '<SQL>' | - | stdin  run one-off SQL (not tracked)
-  push [file.sql ...]      apply migrations — default: supabase/migrations/*.sql
+  push [file.sql ...]      apply PLATFORM migrations — default: supabase/migrations/*.sql
                            (idempotent; already-applied files are skipped)
+  push-app [file.sql ...]  apply APP-LAYER migrations — default: supabase/migrations-app/*.sql
+                           (chuglii tables/RPCs/RLS; never runs at boot)
   untrack <file.sql>       un-track a migration so it can be re-applied
   help                     show this help
 
@@ -183,6 +190,8 @@ Examples:
   ./remote.sh status
   ./remote.sh push supabase/migrations/003-foo.sql
   ./remote.sh push
+  ./remote.sh push-app
+  ./remote.sh push-app supabase/migrations-app/013-api-permissions-for-app-layer.sql
   ./remote.sh run "ALTER TABLE public.users ADD COLUMN IF NOT EXISTS avatar_url text;"
   ./remote.sh run < schema.sql
 EOF
@@ -193,6 +202,7 @@ case "${1:-help}" in
   health) shift; cmd_status "$@" ;;
   run|sql|exec) shift; cmd_run "$@" ;;
   push|apply|migrate) shift; cmd_push "$@" ;;
+  push-app|apply-app|migrate-app) shift; cmd_push_app "$@" ;;
   untrack|forget) shift; cmd_untrack "$@" ;;
   help|--help|-h) usage ;;
   *) echo "Unknown command: ${1:-}"; usage; exit 1 ;;

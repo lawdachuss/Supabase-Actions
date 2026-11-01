@@ -285,14 +285,33 @@ Anonymous users are enabled by default (`ENABLE_ANONYMOUS_USERS=true`) — guest
 
 ## 🗂️ Versioned migrations
 
-Schema changes that must survive sessions live in `supabase/migrations/*.sql` (committed). A workflow step applies them on top of the restored database every session, tracking applied files in `public._schema_migrations` so each runs exactly once:
+SQL is split into two folders because a fresh platform boot has no app tables:
+
+| Folder | Contents | When it runs |
+| --- | --- | --- |
+| `supabase/migrations/` | **Supabase-platform SQL only** — auth hook, tracker RLS, API role defaults, platform hardening | Automatically at every session start, on top of the restored database |
+| `supabase/migrations-app/` | **chuglii app SQL** — app tables, RPCs, RLS and their API permissions | Explicitly via `./remote.sh push-app` (never at boot) |
+
+A workflow step applies `supabase/migrations/*.sql` in filename order and tracks
+applied files in `public._schema_migrations`, so each runs exactly once:
 
 ```bash
-echo "ALTER TABLE public.users ADD COLUMN IF NOT EXISTS avatar_url text;" > supabase/migrations/002-avatar-url.sql
-git add supabase/migrations/002-avatar-url.sql && git commit && git push
+echo "ALTER TABLE public.auth_audit ADD COLUMN IF NOT EXISTS ip inet;" > supabase/migrations/014-platform-auth-audit.sql
+git add supabase/migrations/014-platform-auth-audit.sql && git commit && git push
 ```
 
-Failed migrations are left unapplied and retry next session. See `supabase/migrations/README.md`. A ready-to-use **custom access token hook** (`001-custom-access-token-hook.sql`) is included — flip `ENABLE_CUSTOM_ACCESS_TOKEN_HOOK=true` to turn it on and edit the function to add claims.
+Failed migrations are left unapplied and retry next session. See
+[`supabase/migrations/README.md`](supabase/migrations/README.md) and
+[`supabase/migrations-app/README.md`](supabase/migrations-app/README.md).
+A ready-to-use **custom access token hook** (`001-custom-access-token-hook.sql`)
+is included — flip `ENABLE_CUSTOM_ACCESS_TOKEN_HOOK=true` to turn it on and edit
+the function to add claims.
+
+> **Never put app SQL in `supabase/migrations/`** — the boot path would fail on
+> a clean platform database. Use `migrations-app/` and `./remote.sh push-app`.
+> That folder holds incremental migrations, not a bootstrap: restore the base
+> chuglii schema first (see its README). Tracker names are basenames, so the two
+> folders must not reuse a filename.
 
 ### 🌍 Remote control — apply migrations & run SQL from anywhere
 
@@ -309,9 +328,11 @@ EOF
 ./remote.sh status                     # list applied migrations + DB info
 ./remote.sh run "CREATE TABLE public.notes (id bigserial primary key, body text);"
 ./remote.sh run < schema.sql           # one-off SQL from a file/stdin
-./remote.sh push                       # apply supabase/migrations/*.sql (idempotent)
-./remote.sh push supabase/migrations/003-foo.sql
-./remote.sh untrack 002-backfill-user-emails.sql   # make it re-apply on next push
+./remote.sh push                       # apply supabase/migrations/*.sql (platform, idempotent)
+./remote.sh push-app                   # apply supabase/migrations-app/*.sql (app layer, idempotent)
+./remote.sh push supabase/migrations/014-platform-auth-audit.sql
+./remote.sh push-app supabase/migrations-app/013-api-permissions-for-app-layer.sql
+./remote.sh untrack 013-api-permissions-for-app-layer.sql   # make it re-apply on next push
 ```
 
 It calls a built-in edge function (`/api/migrate` or `/functions/v1/migrate`, service-role key required) that executes SQL as the postgres superuser and records each applied migration in `public._schema_migrations` — **the same table** the session-start step uses, so:
@@ -659,6 +680,29 @@ Run 3: Restore from cache → Use Supabase → snapshot all state → Save to ca
 ```
 
 Each archive contains custom-format dumps of every connectable non-template PostgreSQL database, PostgreSQL global roles/memberships and `ALTER SYSTEM` settings, Redis RDB and AOF data, Inbucket messages, Studio-managed functions and snippets, the pgsodium root key, and a whitelist of non-secret `.env` settings. Database dumps are validated before replacing the previous database snapshot; restore runs before application services start. Legacy single-database archives remain restorable. Code and tracked configuration changes are restored by the repository checkout; Studio-managed functions and snippets are included in the state archive.
+
+#### Persistence contract (what survives the 5-hour handover)
+
+| State | Captured by | Restored by |
+|---|---|---|
+| Every non-template database — `postgres`, `_supabase`, and any database created later via `./remote.sh run 'CREATE DATABASE …'` | `pg_dump --format=custom --create` per database, validated with `pg_restore --list` | `pg_restore --clean --create` as `supabase_admin`, then the recorded owner is re-asserted |
+| Tables, views, RPCs, indexes, triggers, RLS policies, sequences, extensions, large objects | inside each database dump | same |
+| Grants and `ALTER DEFAULT PRIVILEGES` (migrations 011/012) | each database dump (`pg_default_acl`) | same — new tables still get the restored defaults |
+| Database-level GUCs such as `ALTER DATABASE postgres SET app.settings.jwt_exp` (`volumes/db/jwt.sql`) | each database dump (`pg_db_role_setting`) | same |
+| Roles, memberships, tablespaces (custom-role password hashes; managed roles get their passwords from `volumes/db/roles.sql`) | `pg_dumpall --globals-only` | workflow's awk filter + `psql` as `supabase_admin` |
+| Migration tracker rows (`public._schema_migrations`, platform **and** app) | `postgres` database dump | same — already-applied migrations are skipped, not re-run |
+| `vault`/pgsodium-encrypted data | `postgres` database dump **plus** `pgsodium_root.key` | key injected into `db-config` **before** the database boots |
+| Redis DB 0 (Kong rate limits), DB 1 (app cache), and the `redis-http` keyspace | `BGSAVE` RDB + `BGREWRITEAOF` AOF, manifest-validated | AOF installed (primary, per-second durability); RDB kept as fallback |
+| Inbucket mail | live container copy | `volumes/inbucket/data` |
+| Studio-managed functions/snippets | `volumes/functions`, `volumes/snippets` | restored; committed functions win |
+| Non-secret runtime settings (`.env` allowlist) | `.state-settings.env` | merged back into `.env` |
+| `ALTER SYSTEM` settings | `postgresql.auto.conf` | written back, database restarted |
+| Repo-tracked SQL (`supabase/migrations/`, `supabase/migrations-app/`) | **git** | checkout — must be committed to survive |
+
+Two consequences worth remembering:
+
+- A `./remote.sh push` / `push-app` is captured by the next 5-minute on-disk snapshot and by the end-of-session cache save. If the session dies between the push and the next snapshot, the tracker row is gone with it — re-run the same `push` (all files are idempotent).
+- The state archive does **not** back up uncommitted repository files. Commit `supabase/migrations-app/*.sql` before relying on them in a later session.
 
 Secrets such as database/JWT passwords, SMTP credentials, OAuth secrets, and API keys are deliberately not copied from `.env`; configure them as GitHub Actions secrets. Backups contain database contents, role password hashes, captured mail, and Cloudflare refresh credentials, so restrict access to Actions caches and any configured Cloudflare KV backup token. Supabase object storage is not enabled in this stack and therefore its objects are not included.
 

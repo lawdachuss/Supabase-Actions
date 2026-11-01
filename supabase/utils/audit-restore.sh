@@ -12,6 +12,11 @@
 #              -> per-DB pg_restore --create --clean -> ALTER DATABASE OWNER
 #              -> assert the data, ownership and roles came back
 #
+# It also asserts the persistence contract the 5-hour handover depends on:
+# migration-tracker rows, database-level GUCs (ALTER DATABASE ... SET),
+# restored ALTER DEFAULT PRIVILEGES (pg_default_acl) and the contents of the
+# second database (_supabase), not just its owner.
+#
 # Why it exists: the restore path silently produced an EMPTY database once
 # (a db owned by a non-superuser failed "permission denied to create database",
 # which aborted the whole restore), and the globals filter dropped memberships
@@ -184,6 +189,27 @@ for needle in 'pg_restore -U supabase_admin' '--clean --if-exists --create --dis
     || die "the workflow's restore command no longer contains '$needle' — mirror it here before trusting this audit"
 done
 
+# ── platform/app split guard: supabase/migrations/ is replayed on a fresh
+#    platform-only database at every session start. If any of those files
+#    references a chuglii app object, the whole file fails on a cache miss and
+#    its grants never apply. That is exactly the bug this split fixed, so make
+#    a regression fail CI instead of a fresh boot.
+info "platform migrations must not reference app-layer objects"
+APP_OBJECT_RE='(user_premium|premium_purchases|site_settings|performer_follows|user_notifications|user_notification_preferences|edge_cache|claim_premium_reward|increment_viewer_count|watch_history|user_profiles)'
+APP_HITS=""
+for f in "$ROOT"/supabase/migrations/*.sql; do
+  [ -e "$f" ] || continue
+  # Ignore SQL comments: they may name the app objects to explain the split.
+  hit=$(sed 's/--.*$//' "$f" | grep -nEi "$APP_OBJECT_RE" || true)
+  [ -z "$hit" ] || APP_HITS="${APP_HITS}$(basename "$f"):${hit}"$'\n'
+done
+if [ -z "$APP_HITS" ]; then
+  pass "platform migrations reference no app-layer objects"
+else
+  fail "platform migrations reference app-layer objects (move them to migrations-app/)"
+  printf '%s' "$APP_HITS" | head -10 | sed 's/^/       /'
+fi
+
 # ── pull the globals awk filter straight out of the workflow, so editing the
 #    filter there immediately changes what this audit exercises.
 python3 - "$WF" "$WORK/filter.awk" <<'PY' || die "could not extract the workflow's globals awk filter"
@@ -262,6 +288,30 @@ INSERT INTO public.child VALUES (10,1),(11,2) ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION public.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.body := NEW.body; RETURN NEW; END $$;
 DROP TRIGGER IF EXISTS notes_touch ON public.notes;
 CREATE TRIGGER notes_touch BEFORE INSERT ON public.notes FOR EACH ROW EXECUTE FUNCTION public.touch();
+
+-- Migration tracker (platform + app layers share it). Its rows must survive,
+-- or every committed/applied migration re-runs on the next session.
+CREATE TABLE IF NOT EXISTS public._schema_migrations (
+  name text PRIMARY KEY, applied_at timestamptz DEFAULT now());
+INSERT INTO public._schema_migrations (name) VALUES
+  ('001-custom-access-token-hook.sql'),
+  ('013-api-permissions-for-app-layer.sql')
+ON CONFLICT DO NOTHING;
+
+-- Database-level GUCs (volumes/db/jwt.sql uses ALTER DATABASE ... SET).
+ALTER DATABASE postgres SET "app.settings.jwt_exp" = '3600';
+
+-- Default privileges (migrations 011/012) live in pg_default_acl; a restored
+-- database must still grant service_role on tables created afterwards.
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  GRANT SELECT ON TABLES TO service_role;
+SQL
+pq 1 psql -X -U postgres -q -v ON_ERROR_STOP=1 -d _supabase <<'SQL' >/dev/null 2>&1
+CREATE SCHEMA IF NOT EXISTS _analytics;
+CREATE TABLE IF NOT EXISTS _analytics.logs (id bigserial PRIMARY KEY, event text);
+INSERT INTO _analytics.logs (event)
+  SELECT 'e' || g FROM generate_series(1,3) g
+  WHERE NOT EXISTS (SELECT 1 FROM _analytics.logs);
 SQL
 pq 1 psql -X -U postgres -q -v ON_ERROR_STOP=1 -d appdb <<'SQL' >/dev/null 2>&1
 CREATE TABLE IF NOT EXISTS public.widgets (id serial PRIMARY KEY, label text);
@@ -382,6 +432,25 @@ chk "custom role restored"              postgres "select count(*) from pg_roles 
 chk "custom role kept LOGIN"            postgres "select rolcanlogin from pg_roles where rolname='app_owner'" t
 chk "managed roles intact"              postgres "select count(*) from pg_roles where rolname in ('anon','authenticated','service_role','authenticator','supabase_admin')" 5
 chk "membership app_owner->authenticated" postgres "select count(*) from pg_auth_members m join pg_roles r on r.oid=m.roleid join pg_roles g on g.oid=m.member where r.rolname='app_owner' and g.rolname='authenticated'" 1
+
+# ── persistence contract: everything the 5-hour handover depends on ──────────
+# These are the pieces that, if dropped, silently re-run migrations or break
+# the API on the next session instead of failing loudly.
+chk "postgres: migration tracker survived" postgres \
+  "select count(*) from public._schema_migrations where name='013-api-permissions-for-app-layer.sql'" 1
+chk "postgres: tracker keeps platform rows" postgres \
+  "select count(*) from public._schema_migrations where name='001-custom-access-token-hook.sql'" 1
+chk "postgres: database-level GUC survived" postgres \
+  "select current_setting('app.settings.jwt_exp', true)" 3600
+chk "_supabase: rows survived" _supabase \
+  "select count(*) from _analytics.logs" 3
+
+# pg_default_acl: create a table AFTER the restore and check the restored
+# default privilege still applies to it.
+pq 2 psql -X -U postgres -q -v ON_ERROR_STOP=1 -d postgres \
+  -c "CREATE TABLE IF NOT EXISTS public.dp_probe (id int)" >/dev/null 2>&1
+chk "postgres: default privileges survived" postgres \
+  "select has_table_privilege('service_role','public.dp_probe','SELECT')" t
 
 echo
 echo "=============================================================="
