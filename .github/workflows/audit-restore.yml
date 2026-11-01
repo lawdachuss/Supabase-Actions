@@ -1,0 +1,76 @@
+# =============================================================================
+#  Restore audit — exercise the snapshot/restore path on every change
+# =============================================================================
+# supabase/utils/audit-restore.sh stands up two real PostgreSQL clusters
+# (session N and a fresh session N+1), snapshots with the workflow's own dump
+# commands, restores with the workflow's own pg_restore invocation and globals
+# awk filter, and asserts the data, ownership and roles came back.
+#
+# It exists because this path failed silently once: a database owned by a
+# non-superuser aborted the whole restore ("permission denied to create
+# database"), and the globals filter dropped memberships whose grantee was a
+# managed role. Both are asserted, so a regression fails the PR instead of
+# showing up as "my data vanished overnight".
+#
+# Scope: only the persistence path. Paths are filtered so a docs or frontend
+# change does not pay for a database run.
+# =============================================================================
+
+name: Restore audit
+
+on:
+  push:
+    paths:
+      - 'supabase/utils/audit-restore.sh'
+      - 'supabase/utils/snapshot-state.sh'
+      - 'supabase/migrations/**'
+      - 'supabase/volumes/db/**'
+      - '.github/workflows/supabase-host.yml'
+      - '.github/workflows/audit-restore.yml'
+  pull_request:
+    paths:
+      - 'supabase/utils/audit-restore.sh'
+      - 'supabase/utils/snapshot-state.sh'
+      - 'supabase/migrations/**'
+      - 'supabase/volumes/db/**'
+      - '.github/workflows/supabase-host.yml'
+      - '.github/workflows/audit-restore.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read                  # checkout only
+
+concurrency:
+  group: audit-restore-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restore:
+    name: dump -> fresh cluster -> restore
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run the restore audit against a real PostgreSQL
+        env:
+          AUDIT_BACKEND: docker
+          # The stack ships supabase/postgres:17.6.1.136; the audit targets the
+          # restore mechanics, so the plain image (same major version, no
+          # supabase extensions) is enough and starts far faster. Point
+          # AUDIT_IMAGE at supabase/postgres:17.6.1.136 for full fidelity.
+          AUDIT_IMAGE: postgres:17
+          AUDIT_KEEP_WORK: '1'             # keep the dump/restore logs when the audit fails
+          AUDIT_WORK_ROOT: ${{ runner.temp }}  # so the artifact step can find the kept dir
+        run: bash supabase/utils/audit-restore.sh
+
+      - name: Upload the logs when a check fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: restore-audit-logs
+          path: ${{ runner.temp }}/audit-restore.*/**
+          if-no-files-found: ignore
+          retention-days: 7

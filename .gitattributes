@@ -1,0 +1,47 @@
+# =============================================================================
+#  Line endings — LF everywhere
+# =============================================================================
+# Everything in this repo is read by a shell, a YAML parser or Docker, and a
+# leftover CR is not cosmetic here: CRLF in a .sh file breaks its shebang
+# ("cannot find an appropriate entrypoint") and CRLF in a compose/YAML file
+# breaks the parsed value. Both have already bitten this project.
+#
+# `eol=lf` normalises the working tree AND the repository, so a Windows
+# checkout gets LF too instead of silently re-introducing CRLF. The CI guard in
+# .github/workflows/check-line-endings.yml is the tripwire for a commit that
+# gets past this (e.g. pushed from a machine with core.autocrlf=false).
+# =============================================================================
+
+* text=auto eol=lf
+
+# Shell — a CR after the shebang stops the script from running at all.
+*.sh           text eol=lf
+*.bash         text eol=lf
+
+# YAML / Docker — compose, workflows, kong, vector, pooler.
+*.yml          text eol=lf
+*.yaml         text eol=lf
+Dockerfile     text eol=lf
+Dockerfile.*   text eol=lf
+*.dockerfile   text eol=lf
+*.conf         text eol=lf
+*.toml         text eol=lf
+*.ini          text eol=lf
+
+# SQL init scripts, migrations and edge functions run inside Linux containers.
+*.sql          text eol=lf
+*.ts           text eol=lf
+*.tsx          text eol=lf
+*.js           text eol=lf
+*.mjs          text eol=lf
+*.cjs          text eol=lf
+*.py           text eol=lf
+*.exs          text eol=lf
+*.ex           text eol=lf
+
+# Docs and plain config.
+*.md           text eol=lf
+*.json         text eol=lf
+*.example      text eol=lf
+.env*          text eol=lf
+.gitignore     text eol=lf

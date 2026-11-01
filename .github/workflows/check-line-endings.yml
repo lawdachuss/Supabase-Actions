@@ -1,0 +1,110 @@
+# =============================================================================
+#  Line-ending guard — fail CI on CRLF in scripts and config
+# =============================================================================
+# This stack has no Windows component: every file is read by a shell, a YAML
+# parser, Docker, or a Linux container. A CR is a real breakage, not a style nit
+# — it has already caused "cannot find an appropriate entrypoint" for the Kong
+# entrypoint script (its shebang line ended in \r), and it smuggles a trailing
+# \r into compose/env values read by containers.
+#
+# The repository blobs are LF today; the CRLF kept coming back from Windows
+# checkouts (core.autocrlf=true converts LF -> CRLF on checkout, and every
+# editor then writes CRLF back). .gitattributes pins text files to eol=lf so a
+# clone gets LF on every OS; this job is the tripwire for anything that still
+# reaches the repository as CRLF.
+#
+# Mark "Line endings (LF only)" as a required status check in
+# Settings -> Branches so a CRLF commit cannot merge.
+#
+# Implementation notes, both learned by testing:
+#   * It inspects the BLOBS git has staged/committed (`git cat-file :path`), not
+#     the checkout. That reports what is actually in the repo, so a Windows
+#     clone with core.autocrlf=true produces no false failure.
+#   * It does not pass a carriage return through argv (`grep $'\r$'`). On MSYS
+#     the CR is mangled out of the argument, the pattern degrades to an empty
+#     match, and every file is reported as CRLF — a false alarm in one direction
+#     and, combined with grep's text-mode CRLF translation, a false all-clear in
+#     the other. Python reads bytes, so neither can happen on any platform.
+# =============================================================================
+
+name: Line endings (LF only)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read                      # checkout only
+
+concurrency:
+  group: line-endings-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lf-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Fail on CRLF in scripts and config
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import sys
+
+          # Only the file types this stack actually loads, so a future binary
+          # asset can never trip the guard. Extensionless names like Dockerfile
+          # and .gitignore match at any depth.
+          PATHSPECS = [
+              "*.sh", "*.bash",
+              "*.yml", "*.yaml",
+              "Dockerfile", "Dockerfile.*", "*.dockerfile",
+              "*.conf", "*.toml", "*.ini",
+              "*.sql", "*.ts", "*.tsx", "*.js", "*.mjs", "*.cjs", "*.py",
+              "*.exs", "*.ex",
+              "*.md", "*.json", "*.example", ".env*", ".gitignore",
+          ]
+
+          listing = subprocess.run(
+              ["git", "ls-files", "-z", "--", *PATHSPECS],
+              capture_output=True, check=True,
+          )
+
+          offenders = []
+          for raw in listing.stdout.split(b"\0"):
+              if not raw:
+                  continue
+              path = raw.decode("utf-8", "surrogateescape")
+              blob = subprocess.run(
+                  ["git", "cat-file", "blob", ":" + path], capture_output=True
+              )
+              if blob.returncode != 0:          # not in the index (yet)
+                  continue
+              data = blob.stdout
+              if b"\0" in data:                 # binary content: not ours
+                  continue
+              crlf = data.count(b"\r\n")
+              lone = data.count(b"\r") - crlf   # a CR with no LF after it
+              if crlf or lone:
+                  offenders.append(f"{path} ({crlf} CRLF, {lone} lone CR)")
+
+          if offenders:
+              print(
+                  "::error::CRLF line endings found in "
+                  f"{len(offenders)} file(s) - this repo is LF-only"
+              )
+              for item in offenders:
+                  print(f"  {item}")
+              print()
+              print("Fix locally, then commit the result:")
+              print("  sed -i 's/\\r$//' <file>        # one file")
+              print("  git add --renormalize .        # or everything, via .gitattributes")
+              print("On Windows, also set:  git config core.autocrlf input")
+              sys.exit(1)
+
+          print("OK: no CRLF in any shell/YAML/Docker/SQL/TS/doc file.")
+          PY
