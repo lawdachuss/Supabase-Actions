@@ -43,17 +43,23 @@ API="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/caches"
 prune() {
   local prefix="$1" keep="$2"
   export KEEP="$keep"
+  export PREFIX="$prefix"
   local ids
+  # The REST API's `key` parameter is an EXACT key match, not a prefix — asking
+  # for ?key=supabase-db- always returned zero entries, so nothing was ever
+  # pruned and state archives piled up toward GitHub's 10 GB cap until GitHub
+  # began evicting them. List the entries and match the prefix here instead.
   ids=$(curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
-    "$API?key=${prefix}" 2>/dev/null | \
+    "$API?per_page=100" 2>/dev/null | \
     python3 -c '
 import sys, json, os
 d = json.load(sys.stdin)
 keep = int(os.environ.get("KEEP", "3"))
-ids = [c["id"] for c in sorted(d.get("actions_caches", []),
-       key=lambda c: c["created_at"], reverse=True)]
-print("\n".join(str(i) for i in ids[keep:]))' 2>/dev/null || true)
+prefix = os.environ["PREFIX"]
+entries = [c for c in d.get("actions_caches", []) if c["key"].startswith(prefix)]
+entries.sort(key=lambda c: c["created_at"], reverse=True)
+print("\n".join(str(c["id"]) for c in entries[keep:]))' 2>/dev/null || true)
 
   if [ -n "$ids" ]; then
     local n=0

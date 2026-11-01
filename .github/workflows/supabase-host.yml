@@ -666,6 +666,18 @@ jobs:
             echo "::warning::No state archive found anywhere (cache miss or first run) — starting with a fresh Supabase database."
           fi
 
+          # Persistence baseline: record exactly what this session restored, so
+          # the shutdown step can prove the archive it saves is not older or
+          # smaller than its own input. Captured here - after extraction, before
+          # the first new snapshot overwrites ./state-ts and the archive.
+          rm -f ./.state-baseline
+          if [ -f ./supabase-state.tar.gz ]; then
+            BASELINE_BYTES=$(wc -c < ./supabase-state.tar.gz | tr -d ' \n')
+            BASELINE_TS=$(tar xzf ./supabase-state.tar.gz -O state-ts 2>/dev/null | tr -dc '0-9' | head -1)
+            printf 'size=%s\nts=%s\n' "${BASELINE_BYTES:-0}" "${BASELINE_TS:-0}" > ./.state-baseline
+            echo "   state baseline: ${BASELINE_BYTES:-0} bytes, state-ts ${BASELINE_TS:-unknown}"
+          fi
+
           if ! bash utils/state-settings.sh restore; then
             echo "::error::persisted runtime settings could not be restored"
             exit 1
@@ -694,9 +706,15 @@ jobs:
           PY
           chmod 600 .env
           echo "Supabase and Redis dashboard credentials applied from Actions secrets."
+          # Fail closed on an archive that restored no USABLE database backup.
+          # Checking only for the db-backups DIRECTORY was not enough: restore_db()
+          # prints "No database backup found; starting a fresh database" and keeps
+          # going when the directory exists but the manifest/globals are missing,
+          # which booted an empty stack and then snapshotted it over the good archive.
           if [ -f ./supabase-state.tar.gz ] \
-             && [ ! -d ./db-backups ] && [ ! -f ./backup.dump ]; then
-            echo "::error::state archive contains no database backup; refusing to start a silent fresh database"
+             && [ ! -f ./backup.dump ] \
+             && { [ ! -s ./db-backups/manifest.tsv ] || [ ! -s ./db-backups/globals.sql ]; }; then
+            echo "::error::state archive contains no usable database backup (manifest/globals missing); refusing to start a silent fresh database"
             exit 1
           fi
 
@@ -937,6 +955,15 @@ jobs:
 
               GLOBAL_LOG=$(mktemp)
               GLOBAL_RESTORE_FILE=$(mktemp)
+              # The filter drops a GRANT/REVOKE only when the role being
+              # granted IS a managed one. It used to drop them when either side
+              # was managed, which silently discarded memberships such as
+              # "GRANT app_owner TO authenticated" - audited against a real
+              # server: that membership was gone after every restart. Keeping
+              # them is safe because the managed grantee is recreated by the
+              # image init scripts before the globals are replayed.
+              # (Kept outside the quoted awk program: an apostrophe here would
+              # terminate the shell string.)
               if ! awk '
                 function managed_role(role) {
                   gsub(/"/, "", role)
@@ -949,8 +976,8 @@ jobs:
                 ($1 == "CREATE" && $2 == "ROLE" && managed_role($3)) { next }
                 ($1 == "ALTER" && $2 == "ROLE" && managed_role($3)) { next }
                 ($1 == "COMMENT" && $2 == "ON" && $3 == "ROLE" && managed_role($4)) { next }
-                (($1 == "GRANT" && $3 == "TO") || ($1 == "REVOKE" && $3 == "FROM")) \
-                  && (managed_role($2) || managed_role($4)) { next }
+              (($1 == "GRANT" && $3 == "TO") || ($1 == "REVOKE" && $3 == "FROM")) \
+                && managed_role($2) { next }
                 { print }
               ' ./db-backups/globals.sql > "$GLOBAL_RESTORE_FILE"; then
                 echo "::error::could not prepare PostgreSQL globals for restore"
@@ -1006,11 +1033,19 @@ jobs:
                   RESTORE_FAILED=1
                   break
                 fi
-                RESTORE_LOG=$(mktemp)
-                RESTORE_STATUS=0
-                docker compose exec -T db pg_restore -U "$DB_OWNER" \
-                  --clean --if-exists --create --disable-triggers --exit-on-error --jobs 2 \
-                  -d template1 "/tmp/$DB_DUMP_NAME" 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
+              RESTORE_LOG=$(mktemp)
+              RESTORE_STATUS=0
+              # MUST be a superuser, not $DB_OWNER. --create issues CREATE
+              # DATABASE (needs CREATEDB) and --disable-triggers needs
+              # superuser, so a database owned by an ordinary role failed to
+              # restore at all (audited against a real server: "permission
+              # denied to create database"), which aborted the whole restore and
+              # the session never came up. Ownership is still applied: the
+              # archive replays its own ALTER ... OWNER TO entries and the
+              # ALTER DATABASE step below re-asserts the recorded owner.
+              docker compose exec -T db pg_restore -U postgres \
+                --clean --if-exists --create --disable-triggers --exit-on-error --jobs 2 \
+                -d template1 "/tmp/$DB_DUMP_NAME" 2>"$RESTORE_LOG" || RESTORE_STATUS=$?
                 if [ "$RESTORE_STATUS" -ne 0 ]; then
                   echo "::error::PostgreSQL restore failed for $DB_NAME:"
                   tail -20 "$RESTORE_LOG" | sed 's/^/    /'
@@ -1020,10 +1055,13 @@ jobs:
                 if [ "$RESTORE_FAILED" -ne 0 ]; then
                   break
                 fi
-                if ! printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
-                     | docker compose exec -T db psql -U "$DB_OWNER" -d template1 \
-                       -v ON_ERROR_STOP=1 -v "db_name=$DB_NAME" -v "db_owner=$DB_OWNER" \
-                       >/dev/null; then
+              # Also run as a superuser: pg_restore just recreated the database
+              # as postgres, so $DB_OWNER could not alter it ("must be owner of
+              # database"). A superuser can hand ownership to any role.
+              if ! printf '%s\n' 'ALTER DATABASE :"db_name" OWNER TO :"db_owner";' \
+                   | docker compose exec -T db psql -U postgres -d template1 \
+                     -v ON_ERROR_STOP=1 -v "db_name=$DB_NAME" -v "db_owner=$DB_OWNER" \
+                     >/dev/null; then
                   echo "::error::failed to restore database owner for $DB_NAME"
                   RESTORE_FAILED=1
                   break
@@ -1500,21 +1538,87 @@ jobs:
       # archive is never deleted before the new one is fully written.
       - name:  Final state backup before shutdown
         id: final-snapshot
-        if: "steps.keepalive.outcome == 'success' || steps.keepalive.outcome == 'failure' || steps.keepalive.outcome == 'cancelled'"
+        # always() so a cancelled run / job timeout still takes the snapshot that
+        # the cache-save step below depends on (a custom if: without always() is
+        # skipped on cancellation, which silently threw the whole session away).
+        if: ${{ always() && steps.keepalive.outcome != 'skipped' }}
         env:
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
         run: |
           cd ${{ env.SUPABASE_DIR }}
+          # CRITICAL: snapshot-state.sh authenticates to Redis before it writes
+          # anything, and the stack's password is NOT necessarily the optional
+          # REDIS_PASSWORD secret — 'Super-fast startup' derives one from
+          # JWT_SECRET when that secret is unset. Passing an empty password made
+          # redis-cli answer NOAUTH, so this shutdown snapshot ALWAYS failed for
+          # such deployments and the cache save fell back to a stale marker.
+          # Resolve it exactly like the keepalive loop does: the secret if set,
+          # otherwise the value the containers actually booted with from .env.
+          REDIS_PASSWORD="${REDIS_PASSWORD:-$(grep -E '^REDIS_PASSWORD=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r')}"
+          export REDIS_PASSWORD
           if bash utils/snapshot-state.sh; then
             touch ./.snapshot-success
-          fi
-          if [ -s ./supabase-state.tar.gz ] && [ -f ./.snapshot-success ]; then
-            echo "cache_ready=true" >> "$GITHUB_OUTPUT"
           else
-            echo "cache_ready=false" >> "$GITHUB_OUTPUT"
-            echo "::error::this workflow run produced no successful state snapshot; cache save is disabled"
-            exit 1
+            echo "::warning::the shutdown snapshot did not complete; the last complete on-disk archive will be verified instead"
           fi
+
+          # ── Persistence verification ──────────────────────────────────────
+          # The cache key is unique per run and a cache entry can never be
+          # replaced, so whatever is saved here is what the NEXT session
+          # restores. Prove the archive is complete, newer than the last
+          # snapshot this session took, and no smaller than the archive this
+          # session started from — otherwise fail loudly and leave the previous
+          # cache entry as the next session's restore target.
+          ARCHIVE=./supabase-state.tar.gz
+          fail() {
+            echo "::error::$1"
+            echo "cache_ready=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          }
+
+          # 1. Integrity: readable archive that still carries the database set.
+          [ -s "$ARCHIVE" ] || fail "no state archive on disk at shutdown - nothing to persist"
+          tar tzf "$ARCHIVE" >/dev/null 2>&1 || fail "state archive is not a readable tar.gz"
+          tar tzf "$ARCHIVE" 2>/dev/null | grep -qx 'db-backups/manifest.tsv' \
+            || fail "state archive contains no database manifest (db-backups/manifest.tsv)"
+
+          ARCHIVE_BYTES=$(wc -c < "$ARCHIVE" | tr -d ' \n')
+          ARCHIVE_TS=$(tar xzf "$ARCHIVE" -O state-ts 2>/dev/null | tr -dc '0-9' | head -1)
+
+          # 2. Freshness: snapshot-state.sh writes ./state-ts BEFORE it packs and
+          #    publishes the archive atomically, so on success the two agree. A
+          #    newer ./state-ts means the pack or the mv failed and the archive on
+          #    disk is stale - exactly the case that used to be saved silently.
+          LAST_SNAP_TS=$(cat ./state-ts 2>/dev/null | tr -dc '0-9' | head -1)
+          if [ -n "${ARCHIVE_TS:-}" ] && [ -n "${LAST_SNAP_TS:-}" ] \
+             && [ "$ARCHIVE_TS" -lt "$LAST_SNAP_TS" ]; then
+            fail "archive is OLDER than the last snapshot (archive state-ts $ARCHIVE_TS < last snapshot $LAST_SNAP_TS) - a snapshot failed and left a stale file"
+          fi
+
+          # 3. Growth: compare against what this session restored (.state-baseline,
+          #    written by 'Restore full state'). A shrink means a truncated dump.
+          BASELINE_BYTES=0
+          BASELINE_TS=""
+          if [ -f ./.state-baseline ]; then
+            BASELINE_BYTES=$(sed -n 's/^size=\([0-9][0-9]*\)$/\1/p' ./.state-baseline | head -1)
+            BASELINE_TS=$(sed -n 's/^ts=\([0-9][0-9]*\)$/\1/p' ./.state-baseline | head -1)
+          fi
+          BASELINE_BYTES=${BASELINE_BYTES:-0}
+
+          if [ "$BASELINE_BYTES" -gt 0 ] && [ "$ARCHIVE_BYTES" -lt "$BASELINE_BYTES" ]; then
+            fail "archive SHRANK from $BASELINE_BYTES to $ARCHIVE_BYTES bytes - a database dump is probably truncated; refusing to overwrite good state"
+          fi
+          if [ -n "${BASELINE_TS:-}" ] && [ -n "${ARCHIVE_TS:-}" ] \
+             && [ "$ARCHIVE_TS" -lt "$BASELINE_TS" ]; then
+            fail "archive is OLDER than the one it replaces (archive state-ts $ARCHIVE_TS < restored state-ts $BASELINE_TS)"
+          fi
+
+          echo "  persisted state verified:"
+          echo "    archive bytes:    $ARCHIVE_BYTES (restored baseline: ${BASELINE_BYTES:-0})"
+          echo "    archive state-ts: ${ARCHIVE_TS:-unknown}"
+          echo "    last snapshot ts: ${LAST_SNAP_TS:-unknown}"
+          echo "    restored ts:      ${BASELINE_TS:-fresh start}"
+          echo "cache_ready=true" >> "$GITHUB_OUTPUT"
 
       #  Stop services 
       - name:  Stop Supabase services
@@ -1529,11 +1633,44 @@ jobs:
       # persists the freshest one to the Actions cache at the end of the run.
       # Only runs if NOT cancelled and a valid state archive exists on disk.
       - name:  Save final state to GitHub Actions cache
-        if: "steps.final-snapshot.outputs.cache_ready == 'true' && hashFiles('supabase/supabase-state.tar.gz') != ''"
+        id: cache-save
+        # always(): a cancelled run or the 355-min job timeout must still persist
+        # the freshest archive, otherwise an operator 'restart' loses everything.
+        if: ${{ always() && steps.final-snapshot.outputs.cache_ready == 'true' && hashFiles('supabase/supabase-state.tar.gz') != '' }}
         uses: actions/cache/save@v6
         with:
           path: ${{ env.BACKUP_FILE }}
           key: supabase-db-live-${{ github.run_id }}-${{ github.run_attempt }}-final
+
+      #  Prove the archive actually landed in the cache 
+      # The save step reports success as soon as the upload is accepted, and a
+      # skipped save fails nothing at all. This closes the loop: the freshness and
+      # growth checks above ran against the local FILE, this confirms the stored
+      # ENTRY that the next session will restore.
+      - name:  Verify the archive reached the Actions cache
+        id: cache-verify
+        if: ${{ always() && steps.cache-save.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          KEY="supabase-db-live-${{ github.run_id }}-${{ github.run_attempt }}-final"
+          # size_in_bytes is the compressed size of the stored entry, not the raw
+          # file size, so only existence and non-emptiness are asserted here.
+          for attempt in $(seq 1 12); do
+            SIZE=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/caches?key=${KEY}" \
+              | python3 -c 'import json,sys;k=sys.argv[1];d=json.load(sys.stdin);print(next((int(c.get("size_in_bytes") or 0) for c in d.get("actions_caches",[]) if c.get("key")==k),0))' "$KEY" 2>/dev/null || true)
+            if [ -n "${SIZE:-}" ] && [ "${SIZE:-0}" -gt 0 ] 2>/dev/null; then
+              echo "cache entry verified: ${KEY} (${SIZE} bytes stored)"
+              exit 0
+            fi
+            echo "  cache entry not visible yet (attempt ${attempt}/12) - retrying in 5s"
+            sleep 5
+          done
+          echo "::error::state archive was NOT found in the Actions cache as '${KEY}' - this session's data would be lost on the next run"
+          exit 1
 
       #  Summary 
       - name:  Log session summary

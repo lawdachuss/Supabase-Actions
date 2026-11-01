@@ -44,6 +44,9 @@ Thumbs.db
 /supabase/db-backups.new.*/
 /supabase/db-backups.previous/
 /supabase/.state-settings.env*
+# What this session restored, so the shutdown step can prove the archive it
+# saves is not older or smaller than its own input (see the workflow).
+/supabase/.state-baseline
 /supabase/postgresql.auto.conf*
 # Redis AOF (multi-part appendonly dir) captured by snapshot-state.sh
 /supabase/pgsodium_root.key
