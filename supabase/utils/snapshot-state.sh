@@ -425,3 +425,10 @@ if [ -s ./supabase-state.tar.gz ] && [ -n "$GH_AUTH_TOKEN" ]; then
     echo "  ℹ️  GitHub Release upload skipped or pending permissions"
   fi
 fi
+
+# ── 8. Real-time mid-job save to GitHub Actions Cache ──────────────────
+if [ -s ./supabase-state.tar.gz ] && [ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+  echo "  💾 pushing real-time snapshot to GitHub Actions Cache..."
+  node utils/save-actions-cache.cjs ./supabase-state.tar.gz 2>&1 || true
+fi
+

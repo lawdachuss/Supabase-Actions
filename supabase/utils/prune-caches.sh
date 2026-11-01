@@ -34,7 +34,7 @@ if [ -z "${GITHUB_TOKEN}" ]; then
   exit 0
 fi
 
-export KEEP="${KEEP:-3}"
+export KEEP="${KEEP:-5}"
 export DOCKER_KEEP="${DOCKER_KEEP:-2}"
 API="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/caches"
 

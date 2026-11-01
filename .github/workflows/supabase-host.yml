@@ -97,6 +97,22 @@ jobs:
       - name:  Checkout repo
         uses: actions/checkout@v7
 
+      # ── Expose Actions Runtime for mid-job cache saves ──────────────────
+      - name: 🔑 Expose GitHub Actions cache runtime credentials
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_RUNTIME_TOKEN) {
+              core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN);
+            }
+            if (process.env.ACTIONS_RESULTS_URL) {
+              core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL);
+            }
+            if (process.env.ACTIONS_CACHE_URL) {
+              core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL);
+            }
+            core.info('GitHub Actions cache runtime credentials exported to job environment');
+
       #  Restore caches 
       # NOTE: Docker images are NOT cached anymore  they pull fresh each run
       # (~2 min, in parallel with setup), which keeps the GitHub cache tiny.
@@ -163,6 +179,7 @@ jobs:
             cloudflared version
           ) &
           pip install 'ecdsa>=0.19.0' -q &
+          (npm install --prefix utils --no-save @actions/cache@^4.0.0 @actions/core@^1.10.1 -q) &
           (mkdir -p volumes/{db/data,functions,pooler,snippets,api,logs,redis/data,inbucket/data} && chmod -R 777 volumes/redis/data) &
           
           # Pull Docker images in the background (runs in parallel with setup).
@@ -1476,6 +1493,7 @@ jobs:
             if [ "$NOW" -ge "$NEXT_SNAP" ]; then
               echo ""
               echo " [$(date '+%H:%M:%S')] Realtime Snapshot #$SLOT (every 60s)..."
+              export SLOT
               if bash utils/snapshot-state.sh; then
                 touch ./.snapshot-success
                 SNAPSHOTS=$((SNAPSHOTS + 1))
@@ -1484,8 +1502,8 @@ jobs:
               fi
               NEXT_SNAP=$((NOW + 60))
               SLOT=$((SLOT + 1))
-              # Prune old cache entries once an hour (keeps the 10GB cap in check)
-              if [ $(( SLOT % 60 )) -eq 0 ]; then
+              # Prune old cache entries every 15 snapshots (~15 min, keeps newest 5)
+              if [ $(( SLOT % 15 )) -eq 0 ]; then
                 bash utils/prune-caches.sh >/dev/null 2>&1 || true
               fi
             fi
