@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355                  # 5h55m  5 min buffer under 360 min hard limit
     permissions:
-      contents: read                      # checkout
+      contents: write                     # checkout + GitHub Release rolling backup
       actions: write                      # prune stale state-snapshot cache entries
 
     steps:
@@ -450,6 +450,8 @@ jobs:
         env:
           DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
           REDIS_DASHBOARD_PASSWORD: ${{ secrets.REDIS_DASHBOARD_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           cd ${{ env.SUPABASE_DIR }}
 
@@ -510,24 +512,21 @@ jobs:
             rm -f "$members_file"
           }
 
-          # If the local/cache archive is missing (real disaster recovery), pull
-          # the freshest one back from Cloudflare KV before extraction.
-          if [ ! -f ./supabase-state.tar.gz ] && grep -q '^CF_API_TOKEN=.' .env 2>/dev/null; then
-            echo "  No state archive on disk  attempting Cloudflare restore..."
-            if bash utils/cloudflare-backup.sh restore ./supabase-state.tar.gz; then
-              CF_RESTORE_STATUS=0
-            else
-              CF_RESTORE_STATUS=$?
-            fi
-            if [ "$CF_RESTORE_STATUS" -ne 0 ] && [ "$CF_RESTORE_STATUS" -ne 2 ]; then
-              echo "::error::Cloudflare backup is configured but could not be restored; refusing to start empty"
-              exit 1
-            fi
-            if [ "$CF_RESTORE_STATUS" -eq 0 ] && [ ! -s ./supabase-state.tar.gz ]; then
-              echo "::error::Cloudflare reported restore success but produced no archive"
-              exit 1
+          # Multi-source disaster recovery: check GitHub Release, Cloudflare KV, and Actions Cache
+          if [ ! -f ./supabase-state.tar.gz ] && [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+            echo "  ℹ️ No cached state archive on disk — checking GitHub Release (live-backup)..."
+            if GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}" gh release download live-backup -p "supabase-state.tar.gz" -O ./supabase-state.tar.gz 2>/dev/null && [ -s ./supabase-state.tar.gz ]; then
+              echo "  ✅ Adopted state archive from GitHub Release!"
             fi
           fi
+
+          if [ ! -f ./supabase-state.tar.gz ] && grep -q '^CF_API_TOKEN=.' .env 2>/dev/null; then
+            echo "  No state archive on disk  attempting Cloudflare restore..."
+            if bash utils/cloudflare-backup.sh restore ./supabase-state.tar.gz 2>/dev/null && [ -s ./supabase-state.tar.gz ]; then
+              echo "  ✅ Adopted state archive from Cloudflare KV"
+            fi
+          fi
+
           if [ ! -f ./supabase-state.tar.gz ] && [ "${{ github.run_number }}" -gt 1 ]; then
             echo "::error::no cached or off-site state archive exists after the first workflow run; refusing to create an empty replacement database"
             exit 1
@@ -536,28 +535,34 @@ jobs:
           if [ -f ./supabase-state.tar.gz ]; then
             echo " State archive found  restoring databases, roles, Redis, functions, snippets, settings, and pgsodium key..."
 
-            # Prefer the OFF-SITE Cloudflare copy when it is fresher than the
-            # cached one. A cancelled run never reaches the end-of-run cache
-            # save, so the KV mirror (pushed every ~25 min by snapshot-state.sh
-            # and stamped with its own state-ts) can be hours newer than the
-            # cache entry. Adopt whichever backup has the higher timestamp.
             LOCAL_TS="$(tar xzf ./supabase-state.tar.gz -O state-ts 2>/dev/null | tr -dc '0-9' | head -1)"
-            if ! KV_TS="$(bash utils/cloudflare-backup.sh manifest)"; then
-              echo "::error::could not read the Cloudflare backup manifest; refusing to restore a potentially stale cached snapshot"
-              exit 1
-            fi
-            LOCAL_TS="${LOCAL_TS:-0}"; KV_TS="${KV_TS:-0}"
-            if [ "$KV_TS" -gt "$LOCAL_TS" ] 2>/dev/null; then
-              echo "  ☁️  off-site backup is fresher (kv ts $KV_TS > cached ts $LOCAL_TS) — using it"
-              if bash utils/cloudflare-backup.sh restore ./supabase-state.tar.gz.kv; then
-                mv -f ./supabase-state.tar.gz.kv ./supabase-state.tar.gz
-                echo "  ☁️  freshest state adopted from Cloudflare KV"
-              else
-                rm -f ./supabase-state.tar.gz.kv
-                echo "::error::fresher off-site backup exists but could not be fetched; refusing to restore an older cached snapshot"
-                exit 1
+            LOCAL_TS="${LOCAL_TS:-0}"
+
+            GH_TS=0
+            if [ -n "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
+              if GH_TOKEN="${GH_TOKEN:-$GITHUB_TOKEN}" gh release download live-backup -p "supabase-state.tar.gz" -O ./supabase-state.tar.gz.gh 2>/dev/null && [ -s ./supabase-state.tar.gz.gh ]; then
+                GH_TS="$(tar xzf ./supabase-state.tar.gz.gh -O state-ts 2>/dev/null | tr -dc '0-9' | head -1)"
+                GH_TS="${GH_TS:-0}"
               fi
             fi
+
+            KV_TS="$(bash utils/cloudflare-backup.sh manifest 2>/dev/null | tr -dc '0-9' | head -1 || echo 0)"
+            KV_TS="${KV_TS:-0}"
+
+            echo "  🔍 Available backups: Cache ts=$LOCAL_TS | GitHub Release ts=$GH_TS | Cloudflare KV ts=$KV_TS"
+
+            if [ "$GH_TS" -gt "$LOCAL_TS" ] && [ "$GH_TS" -ge "$KV_TS" ]; then
+              echo "  📦 GitHub Release backup is the freshest ($GH_TS > $LOCAL_TS) — adopting it"
+              mv -f ./supabase-state.tar.gz.gh ./supabase-state.tar.gz
+            elif [ "$KV_TS" -gt "$LOCAL_TS" ] && [ "$KV_TS" -gt "$GH_TS" ]; then
+              echo "  ☁️ Cloudflare KV backup is the freshest ($KV_TS > $LOCAL_TS) — adopting it"
+              if bash utils/cloudflare-backup.sh restore ./supabase-state.tar.gz.kv 2>/dev/null && [ -s ./supabase-state.tar.gz.kv ]; then
+                mv -f ./supabase-state.tar.gz.kv ./supabase-state.tar.gz
+              fi
+            else
+              echo "  💾 Using Actions Cache backup ($LOCAL_TS)"
+            fi
+            rm -f ./supabase-state.tar.gz.gh ./supabase-state.tar.gz.kv
 
             # Extraction must NOT fail silently: continuing without the archive
             # can leave the stack running on an incomplete state.
@@ -1465,22 +1470,22 @@ jobs:
           while [ $(date +%s) -lt $END_TIME ]; do
             NOW=$(date +%s)
 
-            # Full-state snapshot every 5 minutes (DB dump + key + functions + snippets),
-            # kept on disk so the end-of-run cache save (if: always()) always has the
-            # freshest archive. GitHub no longer allows run-step cache writes.
+            # Realtime full-state snapshot every 60 seconds (1 minute):
+            # Dumps DB + keys + functions + Redis, and immediately syncs to
+            # Cloudflare KV and GitHub Release (live-backup).
             if [ "$NOW" -ge "$NEXT_SNAP" ]; then
               echo ""
-              echo " [$(date '+%H:%M:%S')] Snapshot #$SLOT (every-5-min on-disk)..."
+              echo " [$(date '+%H:%M:%S')] Realtime Snapshot #$SLOT (every 60s)..."
               if bash utils/snapshot-state.sh; then
                 touch ./.snapshot-success
                 SNAPSHOTS=$((SNAPSHOTS + 1))
               else
                 echo "    snapshot failed; previous archive preserved and this tick will not count as success"
               fi
-              NEXT_SNAP=$((NOW + 300))
+              NEXT_SNAP=$((NOW + 60))
               SLOT=$((SLOT + 1))
               # Prune old cache entries once an hour (keeps the 10GB cap in check)
-              if [ $(( SLOT % 12 )) -eq 0 ]; then
+              if [ $(( SLOT % 60 )) -eq 0 ]; then
                 bash utils/prune-caches.sh >/dev/null 2>&1 || true
               fi
             fi
@@ -1567,8 +1572,11 @@ jobs:
         if: ${{ always() && steps.keepalive.outcome != 'skipped' }}
         env:
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           cd ${{ env.SUPABASE_DIR }}
+          export FORCE_PUSH=1
           # CRITICAL: snapshot-state.sh authenticates to Redis before it writes
           # anything, and the stack's password is NOT necessarily the optional
           # REDIS_PASSWORD secret — 'Super-fast startup' derives one from

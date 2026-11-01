@@ -348,12 +348,12 @@ pack_archive() {
 
 pack_archive || exit 1
 
-# ── 6. Off-site mirror to Cloudflare KV (best-effort, throttled) ────────
-PUSH_INTERVAL=1500
+# ── 6. Off-site mirror to Cloudflare KV (realtime / fast-sync) ────────
+PUSH_INTERVAL="${CF_PUSH_INTERVAL:-60}"
 CF_MARKER=./.cf_push_last
 if [ -s ./supabase-state.tar.gz ]; then
   DO_PUSH=1
-  if [ -f "$CF_MARKER" ]; then
+  if [ "${FORCE_PUSH:-0}" != "1" ] && [ -f "$CF_MARKER" ]; then
     LAST_PUSH=$(cat "$CF_MARKER" 2>/dev/null || echo 0)
     NOW=$(date +%s)
     if [[ "$LAST_PUSH" =~ ^[0-9]+$ ]] \
@@ -402,5 +402,26 @@ if [ -s ./supabase-state.tar.gz ]; then
     fi
   else
     echo "  ℹ️  Cloudflare push skipped (last push < ${PUSH_INTERVAL}s ago)"
+  fi
+fi
+
+# ── 7. Off-site mirror to GitHub Release (rolling live-backup) ─────────
+GH_AUTH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+if [ -s ./supabase-state.tar.gz ] && [ -n "$GH_AUTH_TOKEN" ]; then
+  echo "  📦 pushing rolling backup to GitHub Release (live-backup)..."
+  GH_PUSH_OK=0
+  for gh_attempt in 1 2 3; do
+    if GH_TOKEN="$GH_AUTH_TOKEN" gh release upload live-backup ./supabase-state.tar.gz --clobber >/dev/null 2>&1; then
+      GH_PUSH_OK=1
+      break
+    else
+      GH_TOKEN="$GH_AUTH_TOKEN" gh release create live-backup ./supabase-state.tar.gz --title "Live Database Backup" --notes "Automated rolling backup for Supabase self-hosted" >/dev/null 2>&1 && { GH_PUSH_OK=1; break; }
+      sleep 2
+    fi
+  done
+  if [ "$GH_PUSH_OK" -eq 1 ]; then
+    echo "  ✅ rolling backup uploaded to GitHub Release"
+  else
+    echo "  ℹ️  GitHub Release upload skipped or pending permissions"
   fi
 fi
